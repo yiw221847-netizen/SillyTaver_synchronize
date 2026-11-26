@@ -31,7 +31,7 @@ const BACKUP_DIR = path.join(CONF_DIR, 'backups');
 
 const PLUGIN_ID = 'tavernsync';
 const PLUGIN_NAME = '酒馆多端同步';
-const VERSION = '1.4.1';
+const VERSION = '1.4.0';
 const DEFAULT_API = 'https://api.github.com';
 /** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
 const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'SillyTaver_synchronize', branch: 'main' };
@@ -1273,6 +1273,10 @@ h1{font-size:17px;margin:0 0 4px}
 h2{font-size:14px;margin:18px 0 8px;color:#9ad}
 label{display:block;margin:8px 0 2px;color:#aaa;font-size:12px}
 input[type=text],input[type=password],input[type=number],select{width:100%;box-sizing:border-box;background:#222;border:1px solid #333;color:#eee;padding:8px;border-radius:6px}
+.pw{position:relative}
+.pw input{padding-right:38px}
+.eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:0;color:#9ad;font-size:15px;line-height:1;padding:6px 8px;cursor:pointer;border-radius:6px}
+.eye:active{background:#2a2a2a}
 select{appearance:none}
 .row{display:flex;gap:8px;flex-wrap:wrap}
 .row>div{flex:1 1 130px}
@@ -1318,7 +1322,7 @@ pre{background:#111;border:1px solid #222;border-radius:6px;padding:10px;white-s
 </select></div>
 </div>
 <label>Personal Access Token（需要 Contents: Read and write）</label>
-<input id="token" type="password" placeholder="github_pat_...">
+<div class="pw"><input id="token" type="password" placeholder="github_pat_..."><button type="button" class="eye" id="eyetoken" title="显示/隐藏">👁</button></div>
 <label>API 地址</label>
 <select id="apiBase">
 <option value="default" selected>直连 api.github.com（推荐）</option>
@@ -1339,7 +1343,7 @@ pre{background:#111;border:1px solid #222;border-radius:6px;padding:10px;white-s
 </label>
 <div class="row" style="margin-top:10px">
   <div><label>加密口令（开启后才用得到）</label>
-  <input type="password" id="pass" placeholder="留空表示不设置 / 不修改"></div>
+  <div class="pw"><input type="password" id="pass" placeholder="留空表示不设置 / 不修改"><button type="button" class="eye" id="eyepass" title="显示/隐藏">👁</button></div></div>
 </div>
 <div class="row" style="margin-top:10px">
   <div><label>拉取前备份保留份数</label>
@@ -1595,6 +1599,15 @@ el('backupList').addEventListener('click', async (ev) => {
     say(e.message, true);
   }
 });
+// 眼睛：在 password / text 之间切换，方便核对粘贴的 token 和口令
+for (const pair of [['eyetoken', 'token'], ['eyepass', 'pass']]) {
+  el(pair[0]).onclick = () => {
+    const box = el(pair[1]);
+    const show = box.type === 'password';
+    box.type = show ? 'text' : 'password';
+    el(pair[0]).textContent = show ? '🙈' : '👁';
+  };
+}
 el('refresh').onclick = act(el('refresh'), load);
 poll().then((running) => { if (running) startPoll(); });
 load().catch((e) => say(e.message, true));
