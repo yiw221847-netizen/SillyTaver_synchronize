@@ -31,7 +31,7 @@ const BACKUP_DIR = path.join(CONF_DIR, 'backups');
 
 const PLUGIN_ID = 'tavernsync';
 const PLUGIN_NAME = '酒馆多端同步';
-const VERSION = '1.4.0';
+const VERSION = '1.4.1';
 const DEFAULT_API = 'https://api.github.com';
 /** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
 const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'SillyTaver_synchronize', branch: 'main' };
@@ -129,6 +129,8 @@ function progressSnapshot() {
         elapsedMs: progress.startedAt ? (Date.now() - progress.startedAt) : 0,
         mbDone: Number((progress.bytesDone / 1024 / 1024).toFixed(2)),
         mbTotal: Number((progress.bytesTotal / 1024 / 1024).toFixed(2)),
+        // 单个大文件上传时进度数字不动，靠这两个字段让面板显示“还在动”
+        currentElapsedMs: progress.current && progress.currentSince ? Date.now() - progress.currentSince : 0,
     };
 }
 
@@ -956,12 +958,18 @@ async function push(cfg, { dryRun = false } = {}) {
             message: `上传 ${adds.length} 个文件（${(bytesTotal / 1024 / 1024).toFixed(1)} MB）…`,
         });
 
+        // 先传大文件：否则最后只剩一个几十 MB 的长尾，进度会长时间不动
+        binary.sort((a, b) => b.size - a.size);
         const blobEntries = await mapLimit(binary, 3, async (b) => {
+            const mb = (b.size / 1024 / 1024).toFixed(1);
+            progressSet({ current: b.path, currentMB: Number(mb), currentSince: Date.now(), message: `正在上传 ${b.path}（${mb} MB）…` });
             const sha = await createBlob(repo, b.buf);
             progressSet({
                 done: progress.done + 1,
                 bytesDone: progress.bytesDone + b.size,
-                message: `上传中… ${progress.done + 1}/${progress.total}`,
+                current: null,
+                currentSince: null,
+                message: `已传 ${progress.done + 1}/${progress.total} 个文件`,
             });
             return { path: b.path, mode: '100644', type: 'blob', sha };
         });
@@ -995,6 +1003,11 @@ async function push(cfg, { dryRun = false } = {}) {
         ];
 
         for (const chunk of chunkEntries(entries)) {
+            progressSet({
+                current: `写入 ${chunk.length} 个文件`,
+                currentSince: Date.now(),
+                message: `写入目录树（${(chunk.reduce((s, e) => s + (e.content ? Buffer.byteLength(e.content) : 0), 0) / 1024 / 1024).toFixed(1)} MB）…`,
+            });
             baseTree = await createTree(repo, baseTree, chunk);
             const chunkBytes = chunk.reduce((s, e) => s + (e.content ? Buffer.byteLength(e.content) : 0), 0);
             progressSet({
@@ -1387,6 +1400,7 @@ function renderProgress(p) {
   if (p.total) parts.push(p.done + '/' + p.total + ' 个文件');
   if (p.bytesTotal) parts.push(p.mbDone + ' / ' + p.mbTotal + ' MB');
   if (p.percent && p.running) parts.push(p.percent + '%');
+  if (p.running && p.current) parts.push(p.current + ' · 已 ' + Math.round((p.currentElapsedMs || 0) / 1000) + 's');
   const txt = (p.message || '') + (parts.length ? '　·　' + parts.join(' · ') : '');
   el('progtxt').textContent = txt;
   el('progtxt').style.color = p.error ? '#e66' : '#9ad';
