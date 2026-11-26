@@ -1,10 +1,10 @@
 {
   "name": "tavernsync",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "main": "index.mjs",
-  "description": "TavernSync：把 SillyTavern 数据同步到私有 GitHub 仓库（无需 git、无依赖、可无代理直连）",
+  "description": "酒馆多端同步（TavernSync）：把 SillyTavern 数据同步到私有 GitHub 仓库（无需 git、无依赖、可无代理直连）",
   "engines": {
     "node": ">=18"
   }

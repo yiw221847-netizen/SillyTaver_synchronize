@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 const blobSha = (buf) => crypto.createHash('sha1').update(`blob ${buf.length}\u0000`).update(buf).digest('hex');
 const rand = () => crypto.randomBytes(20).toString('hex');
 
-export function createMockGitHub() {
+export function createMockGitHub({ privateRepo = true, emptyRepo = false } = {}) {
     const blobs = new Map();
     const trees = new Map();
     const commits = new Map();
@@ -33,7 +33,7 @@ export function createMockGitHub() {
         let m;
 
         if (req.method === 'GET' && (m = p.match(/^\/repos\/([^/]+)\/([^/]+)$/))) {
-            return send(200, { full_name: `${m[1]}/${m[2]}`, private: true, default_branch: 'main' });
+            return send(200, { full_name: `${m[1]}/${m[2]}`, private: privateRepo, default_branch: 'main' });
         }
         if (req.method === 'POST' && p.endsWith('/git/blobs')) {
             const buf = Buffer.from(body.content, 'base64');
@@ -85,7 +85,11 @@ export function createMockGitHub() {
         }
         if (req.method === 'GET' && (m = p.match(/\/git\/ref\/heads\/(.+)$/))) {
             const sha = refs.get(decodeURIComponent(m[1]));
-            if (!sha) return send(404, { message: 'Not Found' });
+            if (!sha) {
+                // 真实 GitHub：仓库没有任何提交时返回 409，而不是 404
+                if (emptyRepo && commits.size === 0) return send(409, { message: 'Git Repository is empty.' });
+                return send(404, { message: 'Not Found' });
+            }
             return send(200, { ref: `refs/heads/${m[1]}`, object: { sha, type: 'commit' } });
         }
         if (req.method === 'PATCH' && (m = p.match(/\/git\/refs\/heads\/(.+)$/))) {
@@ -112,6 +116,22 @@ export function createMockGitHub() {
             const sha = refs.get(branch);
             if (!sha) return null;
             return flatten(commits.get(sha).tree);
+        },
+        /** 直接种一个提交，用于构造「远端已有内容」。paths: { 'a/b.txt': '内容' } */
+        seed(entries = {}) {
+            const list = [];
+            for (const [p, content] of Object.entries(entries)) {
+                const buf = Buffer.from(content, 'utf8');
+                const sha = blobSha(buf);
+                blobs.set(sha, buf);
+                list.push({ path: p, mode: '100644', type: 'blob', sha });
+            }
+            const treeSha = crypto.createHash('sha1').update(JSON.stringify(list)).digest('hex');
+            trees.set(treeSha, list);
+            const commitSha = rand();
+            commits.set(commitSha, { sha: commitSha, tree: treeSha, parents: [], message: 'seed' });
+            refs.set('main', commitSha);
+            return commitSha;
         },
     };
 }

@@ -56,8 +56,22 @@ if (!done) {
 fs.writeFileSync(file, lines.join('\n'));
 JS
 
+# 装前端入口：让「扩展程序」里出现一个按钮，点一下就能跳到同步面板
+EXT_SRC="$SRC/st-extension"
+EXT_DEST="$ST/public/scripts/extensions/third-party/tavernsync"
+if [ -d "$EXT_SRC" ]; then
+  if [ -d "$EXT_DEST" ] && [ "$(cd "$EXT_SRC" && pwd -P)" = "$(cd "$EXT_DEST" && pwd -P)" ]; then
+    echo "前端入口已在 $EXT_DEST，跳过。"
+  else
+    mkdir -p "$EXT_DEST"
+    cp -a "$EXT_SRC/." "$EXT_DEST/"
+    echo "已安装前端入口：扩展程序里会出现「酒馆多端同步」"
+  fi
+fi
+
 echo ""
-echo "装好了。现在重启酒馆，然后打开："
-echo "  http://127.0.0.1:8000/api/plugins/tavernsync/ui"
+echo "装好了。现在重启酒馆（Termux 里 Ctrl+C 再重新启动），然后二选一："
+echo "  1) 酒馆设置 → 扩展程序 → 酒馆多端同步 → 打开同步面板"
+echo "  2) 浏览器直接打开 http://127.0.0.1:8000/api/plugins/tavernsync/ui"
 echo ""
 echo "原来的配置备份在 $ST/config.yaml.bak"

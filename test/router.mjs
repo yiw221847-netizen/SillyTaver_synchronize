@@ -50,7 +50,14 @@ assert.equal(st2.payload.configured, true);
 
 const ui = await call('GET', '/ui');
 assert.equal(ui.status, 200);
-assert.match(ui.payload, /TavernSync/);
+assert.match(ui.payload, /酒馆多端同步/);
+assert.match(ui.payload, /v1\.2\.0/);
+assert.match(ui.payload, /<select id="maxFileMB"/);
+
+// 进度接口
+const prog = await call('GET', '/progress');
+assert.equal(prog.status, 200);
+assert.equal(prog.payload.running, false);
 
 // 没配 token 时 push 应返回 400 而不是崩
 await plugin.saveConfig({ token: '' });

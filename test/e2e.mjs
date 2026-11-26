@@ -98,6 +98,53 @@ await assert.rejects(() => plugin.pull(cfg2), /空的/);
 await mock2.close();
 console.log('✓ 空仓库拉取被拦下');
 
+// 9. 空仓库（GitHub 会返回 409 Git Repository is empty）也能直接推送
+const mockEmpty = createMockGitHub({ emptyRepo: true });
+const portEmpty = await mockEmpty.listen();
+await plugin.saveConfig({ apiBase: `http://127.0.0.1:${portEmpty}` });
+r = await plugin.push(await plugin.loadConfig());
+assert.ok(r.changed >= 1, '空仓库应能直接建分支并推送');
+assert.ok(mockEmpty.headFiles().has('worlds/new.json'));
+await mockEmpty.close();
+console.log('✓ 空仓库（409）可直接推送，自动建分支');
+
+// 10. 公开仓库拒绝推送（避免聊天记录公开）
+const mockPublic = createMockGitHub({ privateRepo: false });
+const portPublic = await mockPublic.listen();
+await plugin.saveConfig({ apiBase: `http://127.0.0.1:${portPublic}` });
+const cfgPublic = await plugin.loadConfig();
+await assert.rejects(() => plugin.push(cfgPublic), /公开/);
+assert.equal(mockPublic.calls.filter((c) => c.includes('/git/blobs')).length, 0, '公开仓库不应上传任何文件');
+await mockPublic.close();
+console.log('✓ 公开仓库被拒绝推送，且没有上传任何数据');
+
+// 11. 远端路径穿越必须被拦下
+const outside = path.join(tmp, 'ESCAPED.txt');
+const mockEvil = createMockGitHub();
+const portEvil = await mockEvil.listen();
+mockEvil.seed({ 'chats/../../ESCAPED.txt': 'should never be written' });
+await plugin.saveConfig({ apiBase: `http://127.0.0.1:${portEvil}` });
+const cfgEvil = await plugin.loadConfig();
+await assert.rejects(() => plugin.pull(cfgEvil), /不安全|越界/);
+let escaped = false;
+try { await fs.stat(outside); escaped = true; } catch { escaped = false; }
+assert.equal(escaped, false, '文件绝不能写到 data 目录之外');
+await mockEvil.close();
+console.log('✓ ../ 路径穿越被拦下，没有写到目录外');
+
+// 12. 错误说明：状态码要能翻译成下一步动作
+assert.match(plugin.explain({ status: 401, message: 'GitHub 401: Bad credentials' }, null), /Token 无效/);
+assert.match(plugin.explain({ status: 404, message: 'GitHub 404: Not Found' }, { owner: 'me', repo: 'r' }), /Only select repositories/);
+assert.match(plugin.explain({ status: 403, message: 'GitHub 403: Forbidden' }, null), /Contents: Read and write/);
+assert.match(plugin.explain({ status: 409, message: 'GitHub 409: Git Repository is empty' }, null), /README/);
+console.log('✓ 401/403/404/409 都有可执行的提示');
+
+// 13. 进度对象收尾正确
+const pg = plugin.progressSnapshot();
+assert.equal(pg.running, false);
+assert.ok(pg.finishedAt, '同步结束后应有 finishedAt');
+console.log('✓ 进度快照正常：', pg.mbTotal, 'MB /', pg.percent + '%');
+
 await mock.close();
 await fs.rm(tmp, { recursive: true, force: true });
 console.log('\n全部通过');

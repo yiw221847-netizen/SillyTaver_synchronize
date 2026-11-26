@@ -1,12 +1,14 @@
-# TavernSync
+# 酒馆多端同步 · TavernSync v1.2.0
 
 Server plugin for SillyTavern that syncs characters, chats, world info and presets to a **private GitHub repository**.
 
 - Pure HTTPS against `api.github.com` — **no git binary, no npm dependencies** (Node 18+ built-in fetch)
 - One commit per push, only changed blobs are uploaded, automatic retry with backoff
+- Refuses to push to a public repository (chat logs must stay private)
+- Pull backs up overwritten files to `~/.tavernsync/backups/<timestamp>/` and rejects unsafe remote paths (`../`, absolute paths)
+- Live progress bar in the web panel (percent / files / MB), plus a front-end entry under Extensions that jumps to the panel
+- Errors explain the next step (401 = token invalid, 404 = repo name or token scope, 409 = empty repo)
 - `settings.json` is excluded by default (often tens of MB); files above the size limit are skipped
-- Pull backs up overwritten files to `~/.tavernsync/backups/<timestamp>/`
-- Web panel at `/api/plugins/tavernsync/ui` plus a CLI (`node index.mjs push`)
 
 ## Install
 

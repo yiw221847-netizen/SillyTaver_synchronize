@@ -1,0 +1,11 @@
+{
+    "display_name": "酒馆多端同步",
+    "loading_order": 90,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "TavernSync",
+    "version": "1.2.0",
+    "homePage": "https://github.com/yiw221847-netizen/tavernsync"
+}
