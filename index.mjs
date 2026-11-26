@@ -31,7 +31,7 @@ const BACKUP_DIR = path.join(CONF_DIR, 'backups');
 
 const PLUGIN_ID = 'tavernsync';
 const PLUGIN_NAME = '酒馆多端同步';
-const VERSION = '1.3.1';
+const VERSION = '1.3.2';
 const DEFAULT_API = 'https://api.github.com';
 /** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
 const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'SillyTaver_synchronize', branch: 'main' };
@@ -1671,6 +1671,9 @@ async function init(router) {
             if (Array.isArray(body.categories)) patch.categories = body.categories.filter((c) => CATEGORIES[c]);
             if (body.maxFileMB !== undefined) patch.maxFileMB = body.maxFileMB;
             if (body.autoPushMinutes !== undefined) patch.autoPushMinutes = body.autoPushMinutes;
+            // 这两个曾经漏在白名单外，导致「允许新建扩展」「备份保留份数」保存不生效
+            if (body.allowNewExtensions !== undefined) patch.allowNewExtensions = Boolean(body.allowNewExtensions);
+            if (body.backupKeep !== undefined) patch.backupKeep = body.backupKeep;
             const saved = await saveConfig(patch);
             scheduleAutoPush(saved.autoPushMinutes);
             log('配置已更新');

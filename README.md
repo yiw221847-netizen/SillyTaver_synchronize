@@ -1,4 +1,4 @@
-# 酒馆多端同步 · TavernSync v1.3.1
+# 酒馆多端同步 · TavernSync v1.3.2
 
 > 把 SillyTavern 的聊天、角色卡、世界书等数据，同步到你自己账号下的**私有 GitHub 仓库**。
 > 不装 git、不装依赖、不挂代理也能跑；手机会员和电脑端共用一份数据。
@@ -29,7 +29,7 @@ bash plugins/tavernsync/install.sh .
 
 ```bash
 cd ~/storage/downloads
-unzip tavernsync-1.3.1.zip -d ts-install
+unzip tavernsync-1.3.2.zip -d ts-install
 bash ts-install/install.sh            # 自动找酒馆；找不到就传路径：bash ts-install/install.sh ~/SillyTavern
 ```
 
