@@ -31,7 +31,7 @@ const BACKUP_DIR = path.join(CONF_DIR, 'backups');
 
 const PLUGIN_ID = 'tavernsync';
 const PLUGIN_NAME = '酒馆多端同步';
-const VERSION = '1.2.1';
+const VERSION = '1.2.2';
 const DEFAULT_API = 'https://api.github.com';
 /** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
 const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'tavernsync', branch: 'main' };
@@ -174,7 +174,7 @@ async function checkRemoteVersion() {
     try {
         const res = await fetch(url, {
             headers: { 'User-Agent': 'tavernsync', 'Cache-Control': 'no-cache' },
-            signal: AbortSignal.timeout(20_000),
+            signal: AbortSignal.timeout(8_000),
         });
         if (!res.ok) throw new Error(`GitHub 返回 ${res.status}`);
         latest = (await res.json()).version || null;
@@ -483,7 +483,7 @@ function isText(buf) {
     return !s.includes('\uFFFD') && Buffer.from(s, 'utf8').equals(buf);
 }
 
-async function collectLocal(cfg, state) {
+async function collectLocal(cfg, state, { hash = true } = {}) {
     const out = new Map();
     const skipped = [];
     const cache = (state && state.hashCache) || {};
@@ -516,6 +516,11 @@ async function collectLocal(cfg, state) {
             if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs) {
                 out.set(repoPath, { abs: f.abs, sha: cached.sha, size: st.size });
                 nextCache[repoPath] = cached;
+                continue;
+            }
+            // 只统计体积时（面板打开）不读文件内容，避免每次都把所有文件哈希一遍
+            if (!hash) {
+                out.set(repoPath, { abs: f.abs, sha: cached ? cached.sha : null, size: st.size });
                 continue;
             }
             let buf;
@@ -766,9 +771,10 @@ async function pull(cfg, { force = false } = {}) {
 // ---------------------------------------------------------------- 状态
 
 async function status() {
+    const startedAt = Date.now();
     const cfg = await loadConfig();
     const state = await loadState();
-    const { files } = await collectLocal(cfg, state).catch(() => ({ files: new Map() }));
+    const { files } = await collectLocal(cfg, state, { hash: false }).catch(() => ({ files: new Map() }));
     const bytes = [...files.values()].reduce((s, f) => s + (f.size || 0), 0);
     return {
         plugin: PLUGIN_ID,
@@ -787,6 +793,7 @@ async function status() {
         maxFileMB: cfg.maxFileMB,
         autoPushMinutes: cfg.autoPushMinutes,
         local: { files: files.size, mb: Number((bytes / 1024 / 1024).toFixed(2)) },
+        tookMs: Date.now() - startedAt,
         last: { commit: state.lastCommit, at: state.at, files: Object.keys(state.files || {}).length },
         busy: Boolean(running),
         progress: progressSnapshot(),
@@ -887,11 +894,13 @@ pre{background:#111;border:1px solid #222;border-radius:6px;padding:10px;white-s
 <div id="msg" class="hint"></div>
 <script>
 const el = (id) => document.getElementById(id);
-async function api(p, body) {
+async function api(p, body, ms) {
+  const timeout = ms || 20000;
   const res = await fetch(new URL(p, location.href), {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(timeout),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
@@ -951,7 +960,13 @@ async function runSync(kind) {
 }
 
 async function load() {
-  const s = await api('status');
+  let s;
+  try {
+    s = await api('status', undefined, 25000);
+  } catch (e) {
+    el('status').textContent = '读取失败：' + e.message + '\n\n（可以点「刷新」重试；如果一直失败，打开 /api/plugins/tavernsync/ping 看服务端是否响应）';
+    throw e;
+  }
   el('owner').value = s.owner || '';
   el('repo').value = s.repo || '';
   el('branch').value = s.branch || 'main';
@@ -970,6 +985,7 @@ async function load() {
   for (const box of el('cats').querySelectorAll('input')) box.checked = s.categories.includes(box.value);
   el('status').textContent = JSON.stringify({
     插件: '酒馆多端同步 v' + s.version,
+    读取耗时: (s.tookMs || 0) + ' ms',
     已配置: s.configured,
     本地文件: s.local.files,
     本地体积MB: s.local.mb,
@@ -1101,6 +1117,9 @@ async function init(router) {
 
     // 推送/拉取的实时进度，前端每 700ms 轮询一次
     router.get('/progress', (req, res) => res.json(progressSnapshot()));
+
+    // 极轻量的存活探测：用来区分「服务端没响应」和「status 太慢」
+    router.get('/ping', (req, res) => res.json({ ok: true, plugin: PLUGIN_ID, version: VERSION, uptimeSec: Math.round(process.uptime()) }));
 
     // 当前版本 vs GitHub 上的最新版本
     router.get('/version', async (req, res) => {

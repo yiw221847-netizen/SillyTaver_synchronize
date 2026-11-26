@@ -51,7 +51,7 @@ assert.equal(st2.payload.configured, true);
 const ui = await call('GET', '/ui');
 assert.equal(ui.status, 200);
 assert.match(ui.payload, /酒馆多端同步/);
-assert.match(ui.payload, /v1\.2\.1/);
+assert.match(ui.payload, /v1\.2\.2/);
 assert.match(ui.payload, /<select id="maxFileMB"/);
 
 // 进度接口
@@ -62,7 +62,16 @@ assert.equal(prog.payload.running, false);
 // 版本接口（离线时也要能返回本地版本）
 const ver = await call('GET', '/version');
 assert.equal(ver.status, 200);
-assert.equal(ver.payload.current, '1.2.1');
+assert.equal(ver.payload.current, '1.2.2');
+
+// 轻量存活探测
+const ping = await call('GET', '/ping');
+assert.equal(ping.status, 200);
+assert.equal(ping.payload.ok, true);
+assert.ok(ping.payload.version);
+
+// status 应该是轻量的（不哈希文件），并且带上耗时字段
+assert.equal(typeof s.payload.tookMs, 'number');
 
 // init 时应自动补装前端入口
 const extManifest = path.join(process.env.TAVERNSYNC_ROOT, 'public/scripts/extensions/third-party/tavernsync/manifest.json');

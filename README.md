@@ -1,4 +1,4 @@
-# 酒馆多端同步 · TavernSync v1.2.1
+# 酒馆多端同步 · TavernSync v1.2.2
 
 > 把 SillyTavern 的聊天、角色卡、世界书等数据，同步到你自己账号下的**私有 GitHub 仓库**。
 > 不装 git、不装依赖、不挂代理也能跑；手机会员和电脑端共用一份数据。
@@ -28,7 +28,7 @@ bash plugins/tavernsync/install.sh .
 
 ```bash
 cd ~/storage/downloads
-unzip tavernsync-1.2.1.zip -d ts-install
+unzip tavernsync-1.2.2.zip -d ts-install
 bash ts-install/install.sh            # 自动找酒馆；找不到就传路径：bash ts-install/install.sh ~/SillyTavern
 ```
 
@@ -65,7 +65,7 @@ install.sh 会做四件事：备份 `config.yaml`、把插件放进 `plugins/`�
 | Token | 保存在 `~/.tavernsync/config.json`（0600），面板不会回显 |
 | API 地址 | 下拉选择：**直连** api.github.com / **镜像**（gh-proxy 反代，直连打不开时选） |
 
-面板顶部会显示 `当前 v1.2.1`，并自动查询 GitHub 上的最新版本：有新版就出现「**一键更新**」按钮（内部执行 `git pull --ff-only`），更新完重启酒馆生效。
+面板顶部会显示 `当前 v1.2.2`，并自动查询 GitHub 上的最新版本：有新版就出现「**一键更新**」按钮（内部执行 `git pull --ff-only`），更新完重启酒馆生效。
 
 同步范围默认「聊天 / 角色卡 / 世界书」。建议先只勾这三类跑通，再逐类加。`settings.json` 常有几十 MB 且各设备偏好不同，默认不同步。
 
@@ -96,6 +96,9 @@ node plugins/tavernsync/index.mjs pull
 | `GET /api/plugins/tavernsync/ui` | 配置面板 |
 | `GET /status` | 状态（不含 token） |
 | `GET /progress` | 当前推送/拉取进度 |
+| `GET /ping` | 极轻量存活探测（面板异常时先试它） |
+| `GET /version` | 本地版本 vs GitHub 最新版本 |
+| `POST /update` | 一键 `git pull` |
 | `POST /config` | 保存配置 |
 | `GET /test` | 测试连接 |
 | `POST /push` | 推送 |
