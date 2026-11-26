@@ -24,10 +24,17 @@ fi
 echo "酒馆目录：$ST"
 cp -a "$ST/config.yaml" "$ST/config.yaml.bak"
 mkdir -p "$ST/plugins"
-rm -rf "$ST/plugins/tavernsync"
-cp -a "$SRC" "$ST/plugins/tavernsync"
-rm -rf "$ST/plugins/tavernsync/test"          # 测试文件不需要装进去
-rm -f  "$ST/plugins/tavernsync/install.sh"    # 安装脚本本身也不用留
+
+DEST="$ST/plugins/tavernsync"
+if [ -d "$DEST" ] && [ "$(cd "$SRC" && pwd -P)" = "$(cd "$DEST" && pwd -P)" ]; then
+  # 已经 git clone 到目标位置了，直接原地使用，别自己删自己
+  echo "插件已在 $DEST，跳过复制。"
+else
+  rm -rf "$DEST"
+  cp -a "$SRC" "$DEST"
+  rm -rf "$DEST/test"          # 测试文件不需要装进去
+  rm -f  "$DEST/install.sh"    # 安装脚本本身也不用留
+fi
 
 node - "$ST/config.yaml" <<'JS'
 const fs = require('fs');

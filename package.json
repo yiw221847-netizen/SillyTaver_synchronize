@@ -1,9 +1,11 @@
 {
   "name": "tavernsync",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "main": "index.mjs",
   "description": "TavernSync：把 SillyTavern 数据同步到私有 GitHub 仓库（无需 git、无依赖、可无代理直连）",
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }
