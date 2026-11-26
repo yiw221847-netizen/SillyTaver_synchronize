@@ -31,7 +31,7 @@ const BACKUP_DIR = path.join(CONF_DIR, 'backups');
 
 const PLUGIN_ID = 'tavernsync';
 const PLUGIN_NAME = '酒馆多端同步';
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 const DEFAULT_API = 'https://api.github.com';
 /** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
 const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'SillyTaver_synchronize', branch: 'main' };
@@ -208,9 +208,43 @@ function cmpVersion(a, b) {
     return 0;
 }
 
+/** 运行时推导上游仓库：优先 package.json 的 repository，其次 git remote，最后放弃检查 */
+let upstreamRepo = null;
+
+async function resolveUpstream() {
+    const parse = (raw) => {
+        const m = String(raw || '').match(/github\.com[:/]+([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?(?:\s|$)/i);
+        return m ? { owner: m[1], repo: m[2].replace(/\.git$/, ''), branch: 'main' } : null;
+    };
+    try {
+        const pkg = JSON.parse(await fs.readFile(path.join(__dirname, 'package.json'), 'utf8'));
+        const url = typeof pkg.repository === 'string' ? pkg.repository : pkg.repository && pkg.repository.url;
+        const parsed = parse(url);
+        if (parsed) return parsed;
+    } catch {
+        // 忽略，继续尝试 git remote
+    }
+    try {
+        const url = await new Promise((resolve, reject) => {
+            execFile('git', ['-C', __dirname, 'remote', 'get-url', 'origin'], { timeout: 10_000 }, (err, stdout) => {
+                if (err) reject(err);
+                else resolve(String(stdout || '').trim());
+            });
+        });
+        const parsed = parse(url);
+        if (parsed) return parsed;
+    } catch {
+        // 不是 git 仓库或没有 remote
+    }
+    return null;
+}
+
 /** 读取 GitHub 上最新发布的版本号（raw CDN，公开仓库，无需 token） */
 async function checkRemoteVersion() {
-    const url = `https://raw.githubusercontent.com/${UPSTREAM.owner}/${UPSTREAM.repo}/${UPSTREAM.branch}/package.json`;
+    if (!upstreamRepo) {
+        return { current: VERSION, latest: null, hasUpdate: false, error: '无法确定上游仓库（插件不是 git 安装且未声明 repository），已跳过版本检查', repo: null };
+    }
+    const url = `https://raw.githubusercontent.com/${upstreamRepo.owner}/${upstreamRepo.repo}/${upstreamRepo.branch}/package.json`;
     let latest = null;
     let error = null;
     try {
@@ -228,7 +262,7 @@ async function checkRemoteVersion() {
         latest,
         hasUpdate: latest ? cmpVersion(latest, VERSION) > 0 : false,
         error,
-        repo: `${UPSTREAM.owner}/${UPSTREAM.repo}`,
+        repo: `${upstreamRepo.owner}/${upstreamRepo.repo}`,
     };
 }
 
@@ -306,6 +340,8 @@ function defaults() {
         categories: [...DEFAULT_CATEGORIES],
         maxFileMB: 20,
         autoPushMinutes: 0,
+        backupKeep: 3,           // 保留几份拉取前备份
+        allowNewExtensions: false, // 是否允许从远端新建本地不存在的扩展
     };
 }
 
@@ -330,6 +366,8 @@ async function saveConfig(patch) {
     if (!(next.maxFileMB > 0)) next.maxFileMB = 20;
     next.autoPushMinutes = Number(next.autoPushMinutes);
     if (!(next.autoPushMinutes >= 0)) next.autoPushMinutes = 0;
+    next.backupKeep = Math.min(10, Math.max(1, Number(next.backupKeep) || 3));
+    next.allowNewExtensions = Boolean(next.allowNewExtensions);
     await fs.mkdir(CONF_DIR, { recursive: true, mode: 0o700 });
     await fs.writeFile(CONF_FILE, JSON.stringify(next, null, 2), { encoding: 'utf8', mode: 0o600 });
     await fs.chmod(CONF_FILE, 0o600).catch(() => {});
@@ -630,6 +668,152 @@ async function backupFile(repoPath, abs, stamp) {
     await fs.copyFile(abs, dest).catch(() => {});
 }
 
+/** 备份目录总大小与份数（用于面板显示） */
+async function backupUsage() {
+    let dirs = [];
+    try {
+        dirs = await fs.readdir(BACKUP_DIR);
+    } catch {
+        return { count: 0, bytes: 0 };
+    }
+    let bytes = 0;
+    let count = 0;
+    for (const name of dirs) {
+        const abs = path.join(BACKUP_DIR, name);
+        let st;
+        try {
+            st = await fs.stat(abs);
+        } catch {
+            continue;
+        }
+        if (!st.isDirectory()) continue;
+        count++;
+        for (const f of await walk(abs)) {
+            const fs2 = await fs.stat(f.abs).catch(() => null);
+            if (fs2) bytes += fs2.size;
+        }
+    }
+    return { count, bytes };
+}
+
+/** 只保留最近 keep 份，另加 1GB 总量上限 */
+async function pruneBackups(keep = 3) {
+    let dirs = [];
+    try {
+        dirs = (await fs.readdir(BACKUP_DIR)).sort().reverse(); // 时间戳命名，倒序即最新在前
+    } catch {
+        return { removed: 0 };
+    }
+    const limitBytes = 1024 * 1024 * 1024;
+    let removed = 0;
+    let total = 0;
+    for (let i = 0; i < dirs.length; i++) {
+        const abs = path.join(BACKUP_DIR, dirs[i]);
+        let size = 0;
+        for (const f of await walk(abs)) {
+            const st = await fs.stat(f.abs).catch(() => null);
+            if (st) size += st.size;
+        }
+        const overCount = i >= keep;
+        const overSize = total + size > limitBytes;
+        if (overCount || overSize) {
+            await fs.rm(abs, { recursive: true, force: true }).catch(() => {});
+            removed++;
+        } else {
+            total += size;
+        }
+    }
+    if (removed) log(`已清理 ${removed} 份旧备份（保留最近 ${keep} 份）`);
+    return { removed };
+}
+
+/** 列出可恢复的备份 */
+async function listBackups() {
+    let dirs = [];
+    try {
+        dirs = (await fs.readdir(BACKUP_DIR)).sort().reverse();
+    } catch {
+        return [];
+    }
+    const out = [];
+    for (const name of dirs) {
+        const abs = path.join(BACKUP_DIR, name);
+        let st;
+        try {
+            st = await fs.stat(abs);
+        } catch {
+            continue;
+        }
+        if (!st.isDirectory()) continue;
+        const files = await walk(abs);
+        let bytes = 0;
+        for (const f of files) {
+            const s2 = await fs.stat(f.abs).catch(() => null);
+            if (s2) bytes += s2.size;
+        }
+        out.push({
+            stamp: name,
+            at: st.mtime.toISOString(),
+            files: files.length,
+            mb: Number((bytes / 1024 / 1024).toFixed(2)),
+        });
+    }
+    return out;
+}
+
+/** 备份里的相对路径 → 本地绝对路径（复用类别映射与越界校验） */
+function backupRelToLocal(rel) {
+    const repoPath = rel.split(path.sep).join('/');
+    const [catKey, ...rest] = repoPath.split('/');
+    const cat = CATEGORIES[catKey];
+    if (!cat) throw new Error(`备份里有未知类别：${repoPath}`);
+    return cat.dir
+        ? safeLocalPath(baseDirOf(cat), [cat.path, ...rest], repoPath)
+        : safeLocalPath(baseDirOf(cat), [cat.path], repoPath);
+}
+
+/** 从某份备份恢复；恢复前先把「当前状态」再备份一份，避免误操作 */
+async function restoreBackup(stamp) {
+    if (!/^[0-9A-Za-z:.\-]+$/.test(String(stamp || ''))) throw new Error('备份名不合法');
+    const dir = path.resolve(BACKUP_DIR, stamp);
+    if (!dir.startsWith(path.resolve(BACKUP_DIR) + path.sep)) throw new Error('备份路径越界');
+    let st;
+    try {
+        st = await fs.stat(dir);
+    } catch {
+        throw new Error(`找不到这份备份：${stamp}`);
+    }
+    if (!st.isDirectory()) throw new Error('这不是一份备份目录');
+
+    const files = await walk(dir);
+    if (!files.length) throw new Error('这份备份是空的');
+
+    const safety = new Date().toISOString().replace(/[:.]/g, '-') + '-before-restore';
+    let restored = 0;
+    const failed = [];
+    for (const f of files) {
+        const rel = path.relative(dir, f.abs);
+        try {
+            const abs = backupRelToLocal(rel);
+            try {
+                const cur = await fs.stat(abs);
+                if (cur.isFile()) await backupFile(rel.split(path.sep).join('/'), abs, safety);
+            } catch {
+                // 当前不存在，无需安全备份
+            }
+            await fs.mkdir(path.dirname(abs), { recursive: true });
+            await fs.copyFile(f.abs, abs);
+            restored++;
+        } catch (err) {
+            failed.push({ path: rel.split(path.sep).join('/'), reason: err.message });
+        }
+    }
+    const cfg = await loadConfig();
+    await pruneBackups(cfg.backupKeep);
+    log(`已从备份 ${stamp} 恢复 ${restored} 个文件${failed.length ? `，${failed.length} 个失败` : ''}`);
+    return { ok: true, stamp, restored, failed, safety };
+}
+
 async function mapLimit(items, limit, fn) {
     const results = new Array(items.length);
     let cursor = 0;
@@ -794,6 +978,8 @@ async function pull(cfg, { force = false } = {}) {
     const repo = `${cfg.owner}/${cfg.repo}`;
     progressStart('pull', '读取远端…');
     try {
+        // 拉取同样要求仓库私有：拉下来的可能是会被酒馆执行的扩展代码
+        await assertPrivateRepo(repo);
         const head = await getHead(repo, cfg.branch);
         if (!head) throw new Error('远端分支还是空的，没有可拉取的内容');
 
@@ -834,6 +1020,17 @@ async function pull(cfg, { force = false } = {}) {
                 progressSet({ done: progress.done + 1, bytesDone: progress.bytesDone + (want.size || 0) });
                 continue;
             }
+
+            // 插件类别：只更新已有的扩展，除非配置里允许新增
+            if (catKey === 'extensions' && !cfg.allowNewExtensions && rest.length) {
+                const dirAbs = safeLocalPath(baseDirOf(cat), [cat.path, rest[0]], repoPath);
+                const exists = await fs.stat(dirAbs).then((st2) => st2.isDirectory()).catch(() => false);
+                if (!exists) {
+                    (result.skippedNew = result.skippedNew || []).push(`${repoPath}`);
+                    progressSet({ done: progress.done + 1, bytesDone: progress.bytesDone + (want.size || 0) });
+                    continue;
+                }
+            }
             if (currentSha) await backupFile(repoPath, abs, stamp);
 
             const buf = await readBlob(repo, want.sha);
@@ -871,6 +1068,7 @@ async function pull(cfg, { force = false } = {}) {
 
         if (result.updated.length || result.removed.length) {
             result.backup = path.join(BACKUP_DIR, stamp);
+            await pruneBackups(cfg.backupKeep);
             log(`拉取完成：${result.updated.length} 个更新，${result.removed.length} 个移除（备份在 ${result.backup}）`);
             progressDone(`拉取完成：${result.updated.length} 个更新，${result.removed.length} 个移除`);
         } else {
@@ -884,6 +1082,59 @@ async function pull(cfg, { force = false } = {}) {
         progressDone(msg.split('｜')[0], msg);
         throw err;
     }
+}
+
+/** 只计算「拉取会发生什么」，不写任何文件（面板在真正拉取前先问一次） */
+async function pullPreview(cfg) {
+    requireConfig(cfg);
+    const repo = `${cfg.owner}/${cfg.repo}`;
+    await assertPrivateRepo(repo);
+    const head = await getHead(repo, cfg.branch);
+    if (!head) return { branchEmpty: true, adds: 0, updates: 0, deletes: 0, newExtensionDirs: [] };
+
+    const remote = await getTree(repo, head.tree);
+    const adds = [];
+    const updates = [];
+    for (const [repoPath, info] of remote) {
+        if (!isManaged(repoPath, cfg.categories)) continue;
+        const [catKey, ...rest] = repoPath.split('/');
+        const cat = CATEGORIES[catKey];
+        if (!cat) continue;
+        const abs = cat.dir
+            ? safeLocalPath(baseDirOf(cat), [cat.path, ...rest], repoPath)
+            : safeLocalPath(baseDirOf(cat), [cat.path], repoPath);
+        const st = await fs.stat(abs).catch(() => null);
+        if (!st || !st.isFile()) {
+            adds.push(repoPath);
+            continue;
+        }
+        const buf = await fs.readFile(abs).catch(() => null);
+        const sha = buf ? sha1Blob(buf) : null;
+        if (sha !== info.sha) updates.push(repoPath);
+    }
+
+    const deletes = [];
+    for (const key of cfg.categories) {
+        const cat = CATEGORIES[key];
+        if (!cat || !cat.dir) continue;
+        for (const f of await walk(path.join(baseDirOf(cat), cat.path))) {
+            const repoPath = `${key}/${f.rel}`;
+            if (!remote.has(repoPath)) deletes.push(repoPath);
+        }
+    }
+
+    const newExtensionDirs = [...new Set(
+        adds.filter((p) => p.startsWith('extensions/')).map((p) => p.split('/')[1]).filter(Boolean),
+    )];
+
+    return {
+        adds: adds.length,
+        updates: updates.length,
+        deletes: deletes.length,
+        newExtensionDirs,
+        allowNewExtensions: Boolean(cfg.allowNewExtensions),
+        files: [...adds, ...updates].slice(0, 60),
+    };
 }
 
 // ---------------------------------------------------------------- 状态
@@ -910,6 +1161,8 @@ async function status() {
         categories: cfg.categories,
         maxFileMB: cfg.maxFileMB,
         autoPushMinutes: cfg.autoPushMinutes,
+        backupKeep: cfg.backupKeep,
+        allowNewExtensions: cfg.allowNewExtensions,
         local: { files: files.size, mb: Number((bytes / 1024 / 1024).toFixed(2)) },
         tookMs: Date.now() - startedAt,
         last: { commit: state.lastCommit, at: state.at, pullAt: state.pullAt, files: Object.keys(state.files || {}).length },
@@ -991,6 +1244,19 @@ pre{background:#111;border:1px solid #222;border-radius:6px;padding:10px;white-s
 <h2>同步范围</h2>
 <div class="cats" id="cats"></div>
 <div class="hint">settings.json 常有几十 MB，默认不同步。</div>
+<label style="display:flex;align-items:center;gap:8px;margin-top:10px">
+  <input type="checkbox" id="allowNew" style="width:auto">
+  <span>允许从远端新建本地没有的扩展（等于允许远端在你的酒馆里执行代码，谨慎开启）</span>
+</label>
+<div class="row" style="margin-top:10px">
+  <div><label>拉取前备份保留份数</label>
+  <select id="backupKeep">
+    <option value="1">1 份</option>
+    <option value="3" selected>3 份（推荐）</option>
+    <option value="5">5 份</option>
+    <option value="10">10 份</option>
+  </select></div>
+</div>
 
 <div>
 <button id="save">保存配置</button>
@@ -1010,6 +1276,10 @@ pre{background:#111;border:1px solid #222;border-radius:6px;padding:10px;white-s
 <h2>状态</h2>
 <pre id="status">读取中…</pre>
 <div id="msg" class="hint"></div>
+
+<h2>备份与恢复</h2>
+<div class="hint" id="backupHint">读取中…</div>
+<div id="backupList"></div>
 <script>
 const el = (id) => document.getElementById(id);
 async function api(p, body, ms) {
@@ -1095,6 +1365,8 @@ async function load() {
   el('branch').value = s.branch || 'main';
   el('maxFileMB').value = String(s.maxFileMB || 20);
   el('autoPushMinutes').value = String(s.autoPushMinutes || 0);
+  el('allowNew').checked = Boolean(s.allowNewExtensions);
+  el('backupKeep').value = String(s.backupKeep || 3);
   mirrorUrl = s.apiMirror || '';
   el('apiBase').value = (s.apiBase && s.apiBase !== 'https://api.github.com') ? 'mirror' : 'default';
   el('token').placeholder = s.tokenSet ? '（已保存，留空不改）' : 'github_pat_...';
@@ -1117,6 +1389,7 @@ async function load() {
     上次时间: s.last.at,
     分支: s.branch,
   }, null, 2);
+  loadBackups().catch(() => {});
 }
 
 function form() {
@@ -1127,6 +1400,8 @@ function form() {
     apiBase: el('apiBase').value === 'mirror' ? mirrorUrl : 'https://api.github.com',
     maxFileMB: Number(el('maxFileMB').value) || 20,
     autoPushMinutes: Number(el('autoPushMinutes').value) || 0,
+    allowNewExtensions: el('allowNew').checked,
+    backupKeep: Number(el('backupKeep').value) || 3,
     categories: [...el('cats').querySelectorAll('input:checked')].map((b) => b.value),
   };
   if (el('token').value.trim()) body.token = el('token').value.trim();
@@ -1167,7 +1442,61 @@ el('test').onclick = act(el('test'), async () => {
   say('连接正常：' + r.repo + ' @ ' + r.branch + (r.head ? '（最新提交 ' + String(r.head).slice(0, 7) + '）' : '（仓库还是空的，推送会自动建分支）'));
 });
 el('push').onclick = () => runSync('push');
-el('pull').onclick = () => runSync('pull');
+el('pull').onclick = async () => {
+  const btn = el('pull');
+  btn.disabled = true;
+  try {
+    const p = await api('pull-preview', {}, 25000);
+    const lines = [];
+    lines.push('本次拉取会：覆盖 ' + p.updates + ' 个、新增 ' + p.adds + ' 个、删除 ' + p.deletes + ' 个文件。');
+    if (p.newExtensionDirs && p.newExtensionDirs.length) {
+      lines.push(p.allowNewExtensions
+        ? '将新建扩展：' + p.newExtensionDirs.join('、')
+        : '以下扩展本地没有，会被跳过（需要「允许从远端新建扩展」才会拉下来）：' + p.newExtensionDirs.join('、'));
+    }
+    lines.push('');
+    lines.push('继续吗？');
+    if (!confirm(lines.join(String.fromCharCode(10)))) return;
+  } catch (e) {
+    say(e.message, true);
+    return;
+  } finally {
+    btn.disabled = false;
+  }
+  runSync('pull');
+};
+
+async function loadBackups() {
+  try {
+    const r = await api('backups', undefined, 20000);
+    const box = el('backupList');
+    const hint = el('backupHint');
+    hint.textContent = '共 ' + r.backups.length + ' 份，占用 ' + (r.usage.bytes / 1024 / 1024).toFixed(1) + ' MB；保留最近 ' + r.keep + ' 份（超出自动清理最旧的）。';
+    if (!r.backups.length) { box.textContent = '还没有备份（每次拉取前会自动创建一份）。'; return; }
+    box.innerHTML = r.backups.map(function (b) {
+      return '<div class="hint" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #222">'
+        + '<span>' + b.at.replace('T', ' ').slice(0, 19) + ' · ' + b.files + ' 个文件 · ' + b.mb + ' MB</span>'
+        + '<button class="ghost" data-stamp="' + b.stamp + '" style="margin:0;padding:6px 10px">恢复</button>'
+        + '</div>';
+    }).join('');
+  } catch (e) {
+    el('backupHint').textContent = '读取备份失败：' + e.message;
+  }
+}
+
+el('backupList').addEventListener('click', async (ev) => {
+  const stamp = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-stamp');
+  if (!stamp) return;
+  if (!confirm('从这份备份恢复？恢复前会先把当前状态再备份一份，避免误操作。')) return;
+  try {
+    const r = await api('restore', { stamp }, 120000);
+    say('已恢复 ' + r.restored + ' 个文件' + (r.failed && r.failed.length ? '，' + r.failed.length + ' 个失败' : '') + '，页面即将刷新…');
+    await loadBackups();
+    setTimeout(() => location.reload(), 1600);
+  } catch (e) {
+    say(e.message, true);
+  }
+});
 el('refresh').onclick = act(el('refresh'), load);
 poll().then((running) => { if (running) startPoll(); });
 load().catch((e) => say(e.message, true));
@@ -1209,6 +1538,26 @@ async function readBody(req) {
     }
 }
 
+/** 拒绝跨站表单提交：只接受来源与面板同源的 POST */
+function originGuard(req, res, next) {
+    const headers = (req && req.headers) || {};
+    const host = String(headers.host || '').toLowerCase();
+    const src = String(headers.origin || headers.referer || '');
+    if (src && host) {
+        let srcHost = '';
+        try {
+            srcHost = new URL(src).host.toLowerCase();
+        } catch {
+            srcHost = '';
+        }
+        if (srcHost && srcHost !== host) {
+            log(`拒绝跨站请求：来源 ${srcHost} ≠ 面板 ${host}`, 'error');
+            return res.status(403).json({ error: '已拒绝：请求不是从本机面板发起的（防跨站伪造）' });
+        }
+    }
+    return next();
+}
+
 const guard = (fn) => async (req, res) => {
     if (running) return res.status(409).json({ error: '上一次同步还在进行中' });
     running = fn.name || 'sync';
@@ -1230,6 +1579,10 @@ async function init(router) {
     // 自动补装前端入口（扩展可能因为手动安装/更新而缺失）
     await ensureFrontendExtension();
 
+    // 版本检查用的上游仓库：别人 fork / 自建仓库时自动跟随，不再写死某个账号
+    upstreamRepo = await resolveUpstream();
+    if (!upstreamRepo) log('没有找到上游仓库地址，面板里的「检查更新」将不可用', 'error');
+
     router.get('/ui', (req, res) => res.type('html').send(uiHtml()));
     router.get('/status', async (req, res) => {
         try {
@@ -1242,6 +1595,38 @@ async function init(router) {
     // 推送/拉取的实时进度，前端每 700ms 轮询一次
     router.get('/progress', (req, res) => res.json(progressSnapshot()));
 
+    // 备份列表与恢复
+    router.get('/backups', async (req, res) => {
+        try {
+            res.json({ backups: await listBackups(), usage: await backupUsage(), keep: (await loadConfig()).backupKeep });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    router.post('/restore', originGuard, async (req, res) => {
+        if (running) return res.status(409).json({ error: '上一次同步还在进行中，等它结束再恢复' });
+        running = 'restore';
+        try {
+            const body = await readBody(req);
+            const result = await restoreBackup(body.stamp);
+            res.json(result);
+        } catch (err) {
+            res.status(400).json({ error: err.message });
+        } finally {
+            running = null;
+        }
+    });
+
+    // 拉取前预览：会发生什么，先看再决定
+    router.post('/pull-preview', originGuard, async (req, res) => {
+        try {
+            res.json(await pullPreview(await loadConfig()));
+        } catch (err) {
+            res.status(400).json({ error: explain(err, await loadConfig()) });
+        }
+    });
+
     // 极轻量的存活探测：用来区分「服务端没响应」和「status 太慢」
     router.get('/ping', (req, res) => res.json({ ok: true, plugin: PLUGIN_ID, version: VERSION, uptimeSec: Math.round(process.uptime()) }));
 
@@ -1252,7 +1637,7 @@ async function init(router) {
     });
 
     // 一键更新：git pull --ff-only（目录与参数都写死，不接受外部输入）
-    router.post('/update', async (req, res) => {
+    router.post('/update', originGuard, async (req, res) => {
         if (running) return res.status(409).json({ error: '上一次同步还在进行中，等它结束再更新' });
         running = 'update';
         try {
@@ -1276,7 +1661,7 @@ async function init(router) {
     const doPush = async (body) => push(await loadConfig(), { dryRun: Boolean(body && body.dryRun) });
     const doPull = async (body) => pull(await loadConfig(), { force: Boolean(body && body.force) });
 
-    router.post('/config', async (req, res) => {
+    router.post('/config', originGuard, async (req, res) => {
         try {
             const body = await readBody(req);
             const patch = {};
@@ -1314,7 +1699,7 @@ async function init(router) {
         }
     });
 
-    router.post('/push', async (req, res) => {
+    router.post('/push', originGuard, async (req, res) => {
         if (running) return res.status(409).json({ error: '上一次同步还在进行中' });
         running = 'push';
         try {
@@ -1328,7 +1713,7 @@ async function init(router) {
         }
     });
 
-    router.post('/pull', async (req, res) => {
+    router.post('/pull', originGuard, async (req, res) => {
         if (running) return res.status(409).json({ error: '上一次同步还在进行中' });
         running = 'pull';
         try {
@@ -1378,5 +1763,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
 }
 
-export { init, exit, info, push, pull, status, loadConfig, saveConfig, CATEGORIES, progressSnapshot, explain };
+export { init, exit, info, push, pull, status, loadConfig, saveConfig, CATEGORIES, progressSnapshot, explain, listBackups, restoreBackup, pruneBackups, backupUsage, pullPreview };
 export default { init, exit, info };

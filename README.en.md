@@ -1,4 +1,4 @@
-# 酒馆多端同步 · TavernSync v1.3.0
+# 酒馆多端同步 · TavernSync v1.3.1
 
 Server plugin for SillyTavern that syncs characters, chats, world info and presets to a **private GitHub repository**.
 

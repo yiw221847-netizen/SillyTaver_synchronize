@@ -1,4 +1,4 @@
-# 酒馆多端同步 · TavernSync v1.3.0
+# 酒馆多端同步 · TavernSync v1.3.1
 
 > 把 SillyTavern 的聊天、角色卡、世界书等数据，同步到你自己账号下的**私有 GitHub 仓库**。
 > 不装 git、不装依赖、不挂代理也能跑；手机会员和电脑端共用一份数据。
@@ -29,7 +29,7 @@ bash plugins/tavernsync/install.sh .
 
 ```bash
 cd ~/storage/downloads
-unzip tavernsync-1.3.0.zip -d ts-install
+unzip tavernsync-1.3.1.zip -d ts-install
 bash ts-install/install.sh            # 自动找酒馆；找不到就传路径：bash ts-install/install.sh ~/SillyTavern
 ```
 
@@ -87,6 +87,18 @@ install.sh 会做四件事：备份 `config.yaml`、把插件放进 `plugins/`�
 
 **单写多读**：多台设备不要同时点推送，否则后推的会覆盖先推的。约定一台设备负责写，其余只拉取。
 
+### 拉取前预览与备份
+
+- 点「拉取」会先算出「覆盖 / 新增 / 删除」各多少个文件，确认后才执行
+- 每次拉取前自动备份，默认保留最近 **3 份**（可在面板改成 1/3/5/10），面板下方列出可恢复的备份，点「恢复」即可回滚；恢复前会先把当前状态再备份一份
+
+### 酒馆插件（扩展代码）的安全约束
+
+- 该类别默认不勾选；勾选等于允许远端代码在你的酒馆里执行，请确认仓库只有你自己能写
+- 默认**只更新本地已有的扩展**，不会凭空新建；需要新建时显式勾选「允许从远端新建本地没有的扩展」
+- 含 `.git` 的扩展目录会被跳过（那是酒馆自己管理的，避免两边互相覆盖）
+- 推送和拉取都要求仓库是 **Private**，公开仓库直接拒绝
+
 ## 命令行
 
 不开酒馆也能用（读取的是同一份配置）：
@@ -112,6 +124,11 @@ node plugins/tavernsync/index.mjs pull
 | `GET /test` | 测试连接 |
 | `POST /push` | 推送 |
 | `POST /pull` | 拉取（`{force:true}` 允许清空本地已选目录） |
+| `POST /pull-preview` | 预览本次拉取会改动什么，不写文件 |
+| `GET /backups` | 备份列表与占用 |
+| `POST /restore` | 从某份备份恢复（`{stamp}`） |
+
+所有 `POST` 都会校验来源，跨站请求一律拒绝。
 
 ## 安全
 

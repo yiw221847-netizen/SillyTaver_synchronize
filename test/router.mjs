@@ -15,14 +15,14 @@ const plugin = await import('../index.mjs');
 
 const routes = new Map();
 const router = {
-    get: (p, h) => routes.set(`GET ${p}`, h),
-    post: (p, h) => routes.set(`POST ${p}`, h),
+    get: (p, ...hs) => routes.set(`GET ${p}`, hs),
+    post: (p, ...hs) => routes.set(`POST ${p}`, hs),
 };
 await plugin.init(router);
 
-async function call(method, p, body) {
-    const h = routes.get(`${method} ${p}`);
-    assert.ok(h, `route ${method} ${p} 未注册`);
+async function call(method, p, body, headers = {}) {
+    const chain = routes.get(`${method} ${p}`);
+    assert.ok(chain, `route ${method} ${p} 未注册`);
     let payload = null;
     let status = 200;
     const res = {
@@ -31,7 +31,13 @@ async function call(method, p, body) {
         type() { return this; },
         send(d) { payload = d; return this; },
     };
-    await h({ body, method }, res);
+    for (let i = 0; i < chain.length; i++) {
+        const fn = chain[i];
+        const isLast = i === chain.length - 1;
+        let proceeded = false;
+        await fn({ body, method, headers }, res, () => { proceeded = true; });
+        if (!isLast && !proceeded) break;
+    }
     return { status, payload };
 }
 
@@ -51,7 +57,7 @@ assert.equal(st2.payload.configured, true);
 const ui = await call('GET', '/ui');
 assert.equal(ui.status, 200);
 assert.match(ui.payload, /酒馆多端同步/);
-assert.match(ui.payload, /v1\.3\.0/);
+assert.match(ui.payload, /v1\.3\.1/);
 assert.match(ui.payload, /<select id="maxFileMB"/);
 // 页面内联脚本必须能被解析（曾经因为在模板字符串里写了 '\n' 导致整页 JS 语法错误、面板卡在「读取中…」）
 const inline = ui.payload.match(/<script>([\s\S]*?)<\/script>/)[1];
@@ -65,7 +71,7 @@ assert.equal(prog.payload.running, false);
 // 版本接口（离线时也要能返回本地版本）
 const ver = await call('GET', '/version');
 assert.equal(ver.status, 200);
-assert.equal(ver.payload.current, '1.3.0');
+assert.equal(ver.payload.current, '1.3.1');
 
 // 轻量存活探测
 const ping = await call('GET', '/ping');
@@ -79,6 +85,17 @@ assert.equal(typeof s.payload.tookMs, 'number');
 // init 时应自动补装前端入口
 const extManifest = path.join(process.env.TAVERNSYNC_ROOT, 'public/scripts/extensions/third-party/tavernsync/manifest.json');
 await fs.stat(extManifest);
+
+// 跨站请求必须被拒绝（防 CSRF）
+const cross = await call('POST', '/push', {}, { host: '127.0.0.1:8000', origin: 'https://evil.example' });
+assert.equal(cross.status, 403);
+const same = await call('POST', '/push', {}, { host: '127.0.0.1:8000', origin: 'http://127.0.0.1:8000' });
+assert.notEqual(same.status, 403, '同源请求不应被拦');
+
+// 备份接口
+const bk = await call('GET', '/backups');
+assert.equal(bk.status, 200);
+assert.ok(Array.isArray(bk.payload.backups));
 
 // 没配 token 时 push 应返回 400 而不是崩
 await plugin.saveConfig({ token: '' });

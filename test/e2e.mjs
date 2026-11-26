@@ -158,10 +158,19 @@ assert.ok(r.changed >= 2, '应该推送扩展代码的两个文件');
 assert.ok(mock3.headFiles().has('extensions/demo-plugin/index.js'), '仓库里应有 extensions/demo-plugin/index.js');
 
 await fs.rm(extDir, { recursive: true, force: true });
+// 默认不允许凭空新增扩展：本地目录没了就跳过，并说明原因
+r = await plugin.pull(await plugin.loadConfig());
+assert.ok(!r.updated.some((p) => p.includes('demo-plugin/index.js')), '默认不应新建扩展目录');
+assert.ok((r.skippedNew || []).some((p) => p.includes('demo-plugin')), '应记录被跳过的扩展');
+console.log('✓ 默认不凭空新增扩展（已跳过并说明）');
+
+// 显式允许后可以拉回来
+await plugin.saveConfig({ allowNewExtensions: true });
 r = await plugin.pull(await plugin.loadConfig());
 assert.ok(r.updated.some((p) => p.includes('demo-plugin/index.js')));
 assert.equal(await fs.readFile(path.join(extDir, 'index.js'), 'utf8'), 'console.log("demo");');
-console.log('✓ 酒馆插件（扩展代码）可推送与拉取恢复');
+console.log('✓ 允许新增后扩展代码可拉取恢复');
+await plugin.saveConfig({ allowNewExtensions: false });
 await mock3.close();
 
 // 15. 旧文件与新目录同名时，推送要先清理旧文件而不是 422
@@ -197,6 +206,37 @@ assert.ok(![...files5.keys()].some((p) => p.includes('git-managed')), '含 .git 
 assert.ok(r.skipped.some((s2) => s2.path.includes('git-managed')), '跳过的原因要能说清楚');
 console.log('✓ 酒馆自己管理的扩展（含 .git）被跳过并给出原因');
 await mock5.close();
+
+// 17. 备份：列表、恢复、按份数清理
+const mock6 = createMockGitHub();
+const port6 = await mock6.listen();
+await plugin.saveConfig({ apiBase: `http://127.0.0.1:${port6}`, categories: ['chats'], backupKeep: 2 });
+mock6.seed({ 'chats/c1.jsonl': '{"from":"remote"}\n' });
+r = await plugin.pull(await plugin.loadConfig());
+assert.ok(r.updated.includes('chats/c1.jsonl'));
+assert.equal(await fs.readFile(path.join(data, 'chats', 'c1.jsonl'), 'utf8'), '{"from":"remote"}\n');
+
+let backups = await plugin.listBackups();
+assert.ok(backups.length >= 1, '拉取后应有备份');
+const target = backups[0];
+
+// 手动改坏，再从备份恢复
+await fs.writeFile(path.join(data, 'chats', 'c1.jsonl'), 'broken');
+const restoreResult = await plugin.restoreBackup(target.stamp);
+assert.ok(restoreResult.restored >= 1);
+assert.notEqual(await fs.readFile(path.join(data, 'chats', 'c1.jsonl'), 'utf8'), 'broken');
+console.log('✓ 备份可列出、可恢复（恢复前自动再备份）');
+
+// 保留份数：多造几份，应只剩 2 份
+for (let i = 0; i < 3; i++) {
+    await fs.mkdir(path.join(home, '.tavernsync', 'backups', `2099-01-0${i + 1}T00-00-00-000Z`, 'chats'), { recursive: true });
+    await fs.writeFile(path.join(home, '.tavernsync', 'backups', `2099-01-0${i + 1}T00-00-00-000Z`, 'chats', 'c1.jsonl'), 'x');
+}
+await plugin.pruneBackups(2);
+backups = await plugin.listBackups();
+assert.equal(backups.length, 2, '只保留 2 份');
+console.log('✓ 备份按份数自动清理（保留 2 份）');
+await mock6.close();
 
 await mock.close();
 await fs.rm(tmp, { recursive: true, force: true });
