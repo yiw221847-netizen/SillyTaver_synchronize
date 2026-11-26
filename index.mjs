@@ -31,7 +31,7 @@ const BACKUP_DIR = path.join(CONF_DIR, 'backups');
 
 const PLUGIN_ID = 'tavernsync';
 const PLUGIN_NAME = '酒馆多端同步';
-const VERSION = '1.3.2';
+const VERSION = '1.4.0';
 const DEFAULT_API = 'https://api.github.com';
 /** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
 const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'SillyTaver_synchronize', branch: 'main' };
@@ -42,7 +42,7 @@ const TREE_CHUNK_BYTES = 12 * 1024 * 1024;
 
 /** 可同步的类别：key -> data/default-user 下的相对路径 */
 const CATEGORIES = {
-    chats: { label: '聊天记录', path: 'chats', dir: true },
+    chats: { label: '聊天记录', path: 'chats', dir: true, encrypt: true },
     characters: { label: '角色卡', path: 'characters', dir: true },
     worlds: { label: '世界书', path: 'worlds', dir: true },
     groups: { label: '群组', path: 'groups', dir: true },
@@ -342,6 +342,8 @@ function defaults() {
         autoPushMinutes: 0,
         backupKeep: 3,           // 保留几份拉取前备份
         allowNewExtensions: false, // 是否允许从远端新建本地不存在的扩展
+        encryptChats: false,     // 聊天记录上传前加密
+        passphrase: '',          // 加密口令
     };
 }
 
@@ -368,6 +370,8 @@ async function saveConfig(patch) {
     if (!(next.autoPushMinutes >= 0)) next.autoPushMinutes = 0;
     next.backupKeep = Math.min(10, Math.max(1, Number(next.backupKeep) || 3));
     next.allowNewExtensions = Boolean(next.allowNewExtensions);
+    next.encryptChats = Boolean(next.encryptChats);
+    next.passphrase = String(next.passphrase || '');
     await fs.mkdir(CONF_DIR, { recursive: true, mode: 0o700 });
     await fs.writeFile(CONF_FILE, JSON.stringify(next, null, 2), { encoding: 'utf8', mode: 0o600 });
     await fs.chmod(CONF_FILE, 0o600).catch(() => {});
@@ -575,6 +579,55 @@ function isText(buf) {
     return !s.includes('\uFFFD') && Buffer.from(s, 'utf8').equals(buf);
 }
 
+// ---------------------------------------------------------------- 聊天记录加密
+// 可选：把聊天记录用口令加密后再上传。AES-256-GCM，密钥由 scrypt 派生；
+// 每个文件的 IV 由 HMAC(明文) 算出（SIV 思路），同一明文加密结果稳定，
+// 这样增量推送依然有效，不会每次都把全部聊天重传一遍。
+const ENC_MAGIC = Buffer.from('TSENC1');
+const ENC_RE = /\.enc$/;
+const stripEnc = (p) => (ENC_RE.test(p) ? p.slice(0, -4) : p);
+let encCache = { pass: null, enc: null, ivk: null };
+
+function encKeys(cfg) {
+    const pass = String(process.env.TAVERNSYNC_PASSPHRASE || (cfg && cfg.passphrase) || '').trim();
+    if (!pass) throw new Error('已开启聊天记录加密，但没有设置口令');
+    if (encCache.pass === pass) return encCache;
+    const root = crypto.scryptSync(pass, 'tavernsync:chat:v1', 32, { N: 1 << 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+    encCache = {
+        pass,
+        enc: Buffer.from(crypto.hkdfSync('sha256', root, Buffer.alloc(0), 'tavernsync-enc', 32)),
+        ivk: Buffer.from(crypto.hkdfSync('sha256', root, Buffer.alloc(0), 'tavernsync-iv', 32)),
+    };
+    return encCache;
+}
+
+/** 明文 -> TSENC1|iv(12)|tag(16)|密文 */
+function sealChat(buf, cfg) {
+    const k = encKeys(cfg);
+    const iv = crypto.createHmac('sha256', k.ivk).update(buf).digest().subarray(0, 12);
+    const c = crypto.createCipheriv('aes-256-gcm', k.enc, iv);
+    const body = Buffer.concat([c.update(buf), c.final()]);
+    return Buffer.concat([ENC_MAGIC, iv, c.getAuthTag(), body]);
+}
+
+/** 密文 -> 明文；口令不对或格式不符时抛错 */
+function openChat(buf, cfg) {
+    if (buf.length < 28 || !buf.subarray(0, 6).equals(ENC_MAGIC)) {
+        throw new Error('这个文件不是本插件加密的格式（可能并未加密，或口令不对）');
+    }
+    const iv = buf.subarray(6, 18);
+    const tag = buf.subarray(18, 34);
+    const body = buf.subarray(34);
+    const k = encKeys(cfg);
+    const d = crypto.createDecipheriv('aes-256-gcm', k.enc, iv);
+    d.setAuthTag(tag);
+    try {
+        return Buffer.concat([d.update(body), d.final()]);
+    } catch {
+        throw new Error('解密失败：口令不对，或者文件在仓库里被改过');
+    }
+}
+
 /**
  * 列出一个类别的文件。
  * 对「酒馆插件」：跳过含 .git 的扩展目录（那是酒馆自己 git 管理的，两个写入方会互相覆盖）。
@@ -625,7 +678,8 @@ async function collectLocal(cfg, state, { hash = true } = {}) {
                   .then(() => [{ abs: absPath, rel: path.basename(absPath) }])
                   .catch(() => []);
         for (const f of files) {
-            const repoPath = cat.dir ? `${key}/${f.rel}` : key;
+            const encrypted = Boolean(cat.encrypt && cfg.encryptChats);
+            const repoPath = (cat.dir ? `${key}/${f.rel}` : key) + (encrypted ? '.enc' : '');
             let st;
             try {
                 st = await fs.stat(f.abs);
@@ -638,13 +692,13 @@ async function collectLocal(cfg, state, { hash = true } = {}) {
             }
             const cached = cache[repoPath];
             if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs) {
-                out.set(repoPath, { abs: f.abs, sha: cached.sha, size: st.size });
+                out.set(repoPath, { abs: f.abs, sha: cached.sha, size: st.size, enc: encrypted });
                 nextCache[repoPath] = cached;
                 continue;
             }
             // 只统计体积时（面板打开）不读文件内容，避免每次都把所有文件哈希一遍
             if (!hash) {
-                out.set(repoPath, { abs: f.abs, sha: cached ? cached.sha : null, size: st.size });
+                out.set(repoPath, { abs: f.abs, sha: cached ? cached.sha : null, size: st.size, enc: encrypted });
                 continue;
             }
             let buf;
@@ -654,8 +708,9 @@ async function collectLocal(cfg, state, { hash = true } = {}) {
                 skipped.push({ path: repoPath, reason: err.message });
                 continue;
             }
+            if (encrypted) buf = sealChat(buf, cfg);
             const sha = sha1Blob(buf);
-            out.set(repoPath, { abs: f.abs, sha, size: st.size });
+            out.set(repoPath, { abs: f.abs, sha, size: buf.length, enc: encrypted });
             nextCache[repoPath] = { size: st.size, mtimeMs: st.mtimeMs, sha };
         }
     }
@@ -873,7 +928,8 @@ async function push(cfg, { dryRun = false } = {}) {
             if (r && r.sha === f.sha) continue;
             adds.push(repoPath);
             if (dryRun) continue;
-            const buf = await fs.readFile(f.abs);
+            const raw = await fs.readFile(f.abs);
+            const buf = f.enc ? sealChat(raw, cfg) : raw;
             if (isText(buf)) textEntries.push({ path: repoPath, mode: '100644', type: 'blob', content: buf.toString('utf8'), size: buf.length });
             else binary.push({ path: repoPath, buf, size: buf.length });
         }
@@ -999,19 +1055,24 @@ async function pull(cfg, { force = false } = {}) {
         });
 
         for (const repoPath of managed) {
-            const [catKey, ...rest] = repoPath.split('/');
+            const isEnc = ENC_RE.test(repoPath);
+            const localPath = stripEnc(repoPath);
+            const [catKey, ...rest] = localPath.split('/');
             const cat = CATEGORIES[catKey];
             if (!cat) continue;
             // 路径安全：拒绝 .. / 绝对路径，确保只落在 data/default-user 下
             const abs = cat.dir
-                ? safeLocalPath(baseDirOf(cat), [cat.path, ...rest], repoPath)
-                : safeLocalPath(baseDirOf(cat), [cat.path], repoPath);
+                ? safeLocalPath(baseDirOf(cat), [cat.path, ...rest], localPath)
+                : safeLocalPath(baseDirOf(cat), [cat.path], localPath);
             const want = remote.get(repoPath);
 
             let currentSha = null;
             try {
                 const st = await fs.stat(abs);
-                if (st.isFile()) currentSha = sha1Blob(await fs.readFile(abs));
+                if (st.isFile()) {
+                    const localBuf = await fs.readFile(abs);
+                    currentSha = sha1Blob(isEnc ? sealChat(localBuf, cfg) : localBuf);
+                }
             } catch {
                 currentSha = null;
             }
@@ -1031,12 +1092,13 @@ async function pull(cfg, { force = false } = {}) {
                     continue;
                 }
             }
-            if (currentSha) await backupFile(repoPath, abs, stamp);
+            if (currentSha) await backupFile(localPath, abs, stamp);
 
-            const buf = await readBlob(repo, want.sha);
+            const raw = await readBlob(repo, want.sha);
+            const buf = isEnc ? openChat(raw, cfg) : raw;
             await fs.mkdir(path.dirname(abs), { recursive: true });
             await fs.writeFile(abs, buf);
-            result.updated.push(repoPath);
+            result.updated.push(localPath);
             progressSet({
                 done: progress.done + 1,
                 bytesDone: progress.bytesDone + (want.size || 0),
@@ -1044,12 +1106,15 @@ async function pull(cfg, { force = false } = {}) {
             });
         }
 
+        const remoteLocalPaths = new Set([...remote.keys()].filter((p) => isManaged(p, cfg.categories)).map(stripEnc));
         for (const key of cfg.categories) {
             const cat = CATEGORIES[key];
             if (!cat || !cat.dir) continue;
             for (const f of await walk(path.join(baseDirOf(cat), cat.path))) {
+                // 扩展目录里的 .git 是酒馆自己管的，永远不算“远端没有”
+                if (f.rel.split('/').includes('.git')) continue;
                 const repoPath = `${key}/${f.rel}`;
-                if (remote.has(repoPath)) continue;
+                if (remoteLocalPaths.has(repoPath)) continue;
                 await backupFile(repoPath, f.abs, stamp);
                 await fs.rm(f.abs, { force: true });
                 result.removed.push(repoPath);
@@ -1097,29 +1162,34 @@ async function pullPreview(cfg) {
     const updates = [];
     for (const [repoPath, info] of remote) {
         if (!isManaged(repoPath, cfg.categories)) continue;
-        const [catKey, ...rest] = repoPath.split('/');
+        const isEnc = ENC_RE.test(repoPath);
+        const localPath = stripEnc(repoPath);
+        const [catKey, ...rest] = localPath.split('/');
         const cat = CATEGORIES[catKey];
         if (!cat) continue;
         const abs = cat.dir
-            ? safeLocalPath(baseDirOf(cat), [cat.path, ...rest], repoPath)
-            : safeLocalPath(baseDirOf(cat), [cat.path], repoPath);
+            ? safeLocalPath(baseDirOf(cat), [cat.path, ...rest], localPath)
+            : safeLocalPath(baseDirOf(cat), [cat.path], localPath);
         const st = await fs.stat(abs).catch(() => null);
         if (!st || !st.isFile()) {
-            adds.push(repoPath);
+            adds.push(localPath);
             continue;
         }
         const buf = await fs.readFile(abs).catch(() => null);
-        const sha = buf ? sha1Blob(buf) : null;
-        if (sha !== info.sha) updates.push(repoPath);
+        if (!buf) continue;
+        const sha = sha1Blob(isEnc ? sealChat(buf, cfg) : buf);
+        if (sha !== info.sha) updates.push(localPath);
     }
 
+    const remoteLocalPaths = new Set([...remote.keys()].filter((p) => isManaged(p, cfg.categories)).map(stripEnc));
     const deletes = [];
     for (const key of cfg.categories) {
         const cat = CATEGORIES[key];
         if (!cat || !cat.dir) continue;
         for (const f of await walk(path.join(baseDirOf(cat), cat.path))) {
+            if (f.rel.split('/').includes('.git')) continue;
             const repoPath = `${key}/${f.rel}`;
-            if (!remote.has(repoPath)) deletes.push(repoPath);
+            if (!remoteLocalPaths.has(repoPath)) deletes.push(repoPath);
         }
     }
 
@@ -1133,6 +1203,8 @@ async function pullPreview(cfg) {
         deletes: deletes.length,
         newExtensionDirs,
         allowNewExtensions: Boolean(cfg.allowNewExtensions),
+        encryptChats: Boolean(cfg.encryptChats),
+        hasPassphrase: Boolean(cfg.passphrase) || Boolean(process.env.TAVERNSYNC_PASSPHRASE),
         files: [...adds, ...updates].slice(0, 60),
     };
 }
@@ -1248,6 +1320,14 @@ pre{background:#111;border:1px solid #222;border-radius:6px;padding:10px;white-s
   <input type="checkbox" id="allowNew" style="width:auto">
   <span>允许从远端新建本地没有的扩展（等于允许远端在你的酒馆里执行代码，谨慎开启）</span>
 </label>
+<label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px">
+  <input type="checkbox" id="encChats" style="width:auto">
+  <span>加密聊天记录后再上传（AES-256-GCM；仓库里看到的是密文，换设备要输同样的口令才能读）</span>
+</label>
+<div class="row" style="margin-top:10px">
+  <div><label>加密口令（开启后才用得到）</label>
+  <input type="password" id="pass" placeholder="留空表示不设置 / 不修改"></div>
+</div>
 <div class="row" style="margin-top:10px">
   <div><label>拉取前备份保留份数</label>
   <select id="backupKeep">
@@ -1366,6 +1446,8 @@ async function load() {
   el('maxFileMB').value = String(s.maxFileMB || 20);
   el('autoPushMinutes').value = String(s.autoPushMinutes || 0);
   el('allowNew').checked = Boolean(s.allowNewExtensions);
+  el('encChats').checked = Boolean(s.encryptChats);
+  el('pass').placeholder = s.hasPassphrase ? '已设置口令，留空表示不修改' : '还没有设置口令';
   el('backupKeep').value = String(s.backupKeep || 3);
   mirrorUrl = s.apiMirror || '';
   el('apiBase').value = (s.apiBase && s.apiBase !== 'https://api.github.com') ? 'mirror' : 'default';
@@ -1401,10 +1483,12 @@ function form() {
     maxFileMB: Number(el('maxFileMB').value) || 20,
     autoPushMinutes: Number(el('autoPushMinutes').value) || 0,
     allowNewExtensions: el('allowNew').checked,
+    encryptChats: el('encChats').checked,
     backupKeep: Number(el('backupKeep').value) || 3,
     categories: [...el('cats').querySelectorAll('input:checked')].map((b) => b.value),
   };
   if (el('token').value.trim()) body.token = el('token').value.trim();
+  if (el('pass').value.trim()) body.passphrase = el('pass').value.trim();
   return body;
 }
 
@@ -1674,6 +1758,8 @@ async function init(router) {
             // 这两个曾经漏在白名单外，导致「允许新建扩展」「备份保留份数」保存不生效
             if (body.allowNewExtensions !== undefined) patch.allowNewExtensions = Boolean(body.allowNewExtensions);
             if (body.backupKeep !== undefined) patch.backupKeep = body.backupKeep;
+            if (body.encryptChats !== undefined) patch.encryptChats = Boolean(body.encryptChats);
+            if (typeof body.passphrase === 'string') patch.passphrase = body.passphrase;
             const saved = await saveConfig(patch);
             scheduleAutoPush(saved.autoPushMinutes);
             log('配置已更新');
@@ -1768,3 +1854,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 
 export { init, exit, info, push, pull, status, loadConfig, saveConfig, CATEGORIES, progressSnapshot, explain, listBackups, restoreBackup, pruneBackups, backupUsage, pullPreview };
 export default { init, exit, info };
+
+export { sealChat, openChat, stripEnc };

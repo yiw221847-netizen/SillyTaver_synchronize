@@ -238,6 +238,50 @@ assert.equal(backups.length, 2, '只保留 2 份');
 console.log('✓ 备份按份数自动清理（保留 2 份）');
 await mock6.close();
 
+// ---------------------------------------------------------------- 聊天记录加密
+const mockEnc = createMockGitHub();
+const portEnc = await mockEnc.listen();
+const apiBaseEnc = `http://127.0.0.1:${portEnc}`;
+await fs.writeFile(path.join(data, 'chats', 'secret.jsonl'), '{"mes":"这是机密"}\n');
+await plugin.saveConfig({ apiBase: apiBaseEnc, categories: ['chats'], encryptChats: true, passphrase: 'correct horse battery' });
+const cfgEnc = await plugin.loadConfig();
+r = await plugin.push(cfgEnc);
+assert.ok(r.ok, '加密推送应成功');
+
+// 远端应当只有 .enc，且内容确实不是明文
+const H = { Authorization: `Bearer ${cfgEnc.token}`, 'User-Agent': 'tavernsync' };
+const repoBase = `${apiBaseEnc}/repos/${cfgEnc.owner}/${cfgEnc.repo}`;
+const ref = await (await fetch(`${repoBase}/git/ref/heads/main`, { headers: H })).json();
+const commit = await (await fetch(`${repoBase}/git/commits/${ref.object.sha}`, { headers: H })).json();
+const tree = await (await fetch(`${repoBase}/git/trees/${commit.tree.sha}`, { headers: H })).json();
+const chatEntries = tree.tree.filter((e) => e.path.startsWith('chats/'));
+assert.ok(chatEntries.length > 0 && chatEntries.every((e) => e.path.endsWith('.enc')), '聊天记录应以 .enc 上传');
+const secretEntry = chatEntries.find((e) => e.path === 'chats/secret.jsonl.enc');
+assert.ok(secretEntry, '应有 chats/secret.jsonl.enc');
+const blob = Buffer.from(await (await fetch(`${repoBase}/git/blobs/${secretEntry.sha}`, { headers: H })).text(), 'binary');
+assert.ok(!blob.includes(Buffer.from('机密')), '仓库里不应出现明文');
+await fs.writeFile(path.join(data, 'chats', 'c1.jsonl'), '{"from":"remote"}\n');
+const cfgEnc2 = { ...cfgEnc, token: cfgEnc.token };
+await fs.rm(path.join(data, 'chats', 'secret.jsonl'));
+r = await plugin.pull(cfgEnc2);
+assert.ok(r.updated.includes('chats/secret.jsonl'), '应解密回原文件名');
+assert.equal(await fs.readFile(path.join(data, 'chats', 'secret.jsonl'), 'utf8'), '{"mes":"这是机密"}\n');
+console.log('✓ 聊天记录加密上传、拉取自动解密');
+
+// 口令错了必须报错，且不能写出半截文件
+await fs.rm(path.join(data, 'chats', 'secret.jsonl'));
+await assert.rejects(() => plugin.pull({ ...cfgEnc, passphrase: 'wrong pass' }), /口令|解密/);
+assert.equal(await fs.stat(path.join(data, 'chats', 'secret.jsonl')).then(() => true).catch(() => false), false);
+console.log('✓ 口令不对时拉取失败，不落半截文件');
+
+// 同一明文加密结果必须稳定，否则增量推送每次都会重传
+const { sealChat } = plugin;
+const a = sealChat(Buffer.from('same'), cfgEnc);
+const b = sealChat(Buffer.from('same'), cfgEnc);
+assert.ok(a.equals(b), '相同明文应得到相同密文');
+assert.ok(!a.includes(Buffer.from('same')), '密文里不应出现明文');
+
+await mockEnc.close();
 await mock.close();
 await fs.rm(tmp, { recursive: true, force: true });
 console.log('\n全部通过');

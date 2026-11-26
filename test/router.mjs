@@ -63,7 +63,7 @@ assert.equal(st3.payload.backupKeep, 5, '备份保留份数应能保存');
 const ui = await call('GET', '/ui');
 assert.equal(ui.status, 200);
 assert.match(ui.payload, /酒馆多端同步/);
-assert.match(ui.payload, /v1\.3\.2/);
+assert.match(ui.payload, /v1\.4\.0/);
 assert.match(ui.payload, /<select id="maxFileMB"/);
 // 页面内联脚本必须能被解析（曾经因为在模板字符串里写了 '\n' 导致整页 JS 语法错误、面板卡在「读取中…」）
 const inline = ui.payload.match(/<script>([\s\S]*?)<\/script>/)[1];
@@ -77,7 +77,7 @@ assert.equal(prog.payload.running, false);
 // 版本接口（离线时也要能返回本地版本）
 const ver = await call('GET', '/version');
 assert.equal(ver.status, 200);
-assert.equal(ver.payload.current, '1.3.2');
+assert.equal(ver.payload.current, '1.4.0');
 
 // 轻量存活探测
 const ping = await call('GET', '/ping');
