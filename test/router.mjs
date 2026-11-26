@@ -53,6 +53,9 @@ assert.equal(ui.status, 200);
 assert.match(ui.payload, /酒馆多端同步/);
 assert.match(ui.payload, /v1\.2\.2/);
 assert.match(ui.payload, /<select id="maxFileMB"/);
+// 页面内联脚本必须能被解析（曾经因为在模板字符串里写了 '\n' 导致整页 JS 语法错误、面板卡在「读取中…」）
+const inline = ui.payload.match(/<script>([\s\S]*?)<\/script>/)[1];
+assert.doesNotThrow(() => new Function(inline), '页面内联脚本有语法错误');
 
 // 进度接口
 const prog = await call('GET', '/progress');

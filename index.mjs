@@ -964,7 +964,7 @@ async function load() {
   try {
     s = await api('status', undefined, 25000);
   } catch (e) {
-    el('status').textContent = '读取失败：' + e.message + '\n\n（可以点「刷新」重试；如果一直失败，打开 /api/plugins/tavernsync/ping 看服务端是否响应）';
+    el('status').textContent = '读取失败：' + e.message + String.fromCharCode(10, 10) + '（可以点「刷新」重试；如果一直失败，打开 /api/plugins/tavernsync/ping 看服务端是否响应）';
     throw e;
   }
   el('owner').value = s.owner || '';
@@ -1030,7 +1030,7 @@ el('upd').onclick = act(el('upd'), async () => {
   say('正在执行 git pull…');
   try {
     const r = await api('update', {});
-    say(r.note + (r.output ? '（' + String(r.output).split('\n').filter(Boolean).slice(-2).join(' / ') + '）' : ''), true);
+    say(r.note + (r.output ? '（' + String(r.output).split(String.fromCharCode(10)).filter(Boolean).slice(-2).join(' / ') + '）' : ''), true);
   } finally { checkVersion().catch(() => {}); }
 });
 
