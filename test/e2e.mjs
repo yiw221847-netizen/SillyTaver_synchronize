@@ -145,6 +145,59 @@ assert.equal(pg.running, false);
 assert.ok(pg.finishedAt, '同步结束后应有 finishedAt');
 console.log('✓ 进度快照正常：', pg.mbTotal, 'MB /', pg.percent + '%');
 
+// 14. 酒馆插件（扩展代码）同步：路径在 ST 根目录的 public/ 下，不在 data/ 里
+const extDir = path.join(stRoot, 'public', 'scripts', 'extensions', 'third-party', 'demo-plugin');
+await fs.mkdir(extDir, { recursive: true });
+await fs.writeFile(path.join(extDir, 'index.js'), 'console.log("demo");');
+await fs.writeFile(path.join(extDir, 'manifest.json'), JSON.stringify({ display_name: 'demo' }));
+const mock3 = createMockGitHub();
+const port3 = await mock3.listen();
+await plugin.saveConfig({ apiBase: `http://127.0.0.1:${port3}`, categories: ['extensions'] });
+r = await plugin.push(await plugin.loadConfig());
+assert.ok(r.changed >= 2, '应该推送扩展代码的两个文件');
+assert.ok(mock3.headFiles().has('extensions/demo-plugin/index.js'), '仓库里应有 extensions/demo-plugin/index.js');
+
+await fs.rm(extDir, { recursive: true, force: true });
+r = await plugin.pull(await plugin.loadConfig());
+assert.ok(r.updated.some((p) => p.includes('demo-plugin/index.js')));
+assert.equal(await fs.readFile(path.join(extDir, 'index.js'), 'utf8'), 'console.log("demo");');
+console.log('✓ 酒馆插件（扩展代码）可推送与拉取恢复');
+await mock3.close();
+
+// 15. 旧文件与新目录同名时，推送要先清理旧文件而不是 422
+const mock4 = createMockGitHub();
+const port4 = await mock4.listen();
+mock4.seed({ extensions: '{"old":"backup list"}' });
+await plugin.saveConfig({ apiBase: `http://127.0.0.1:${port4}`, categories: ['extensions'] });
+await fs.mkdir(extDir, { recursive: true });
+await fs.writeFile(path.join(extDir, 'index.js'), 'x');
+r = await plugin.push(await plugin.loadConfig());
+const files4 = mock4.headFiles();
+assert.ok(files4.has('extensions/demo-plugin/index.js'));
+assert.ok(!files4.has('extensions'), '同名旧文件应被清掉');
+console.log('✓ 同名文件→目录的冲突已自动分两次提交处理');
+await mock4.close();
+
+// 16. 由酒馆自己 git 管理的扩展要跳过，避免和 ST 的更新互相覆盖
+const gitPlugin = path.join(stRoot, 'public', 'scripts', 'extensions', 'third-party', 'git-managed');
+await fs.mkdir(path.join(gitPlugin, '.git'), { recursive: true });
+await fs.writeFile(path.join(gitPlugin, '.git', 'config'), '[core]');
+await fs.writeFile(path.join(gitPlugin, 'index.js'), 'git managed');
+const plainPlugin = path.join(stRoot, 'public', 'scripts', 'extensions', 'third-party', 'plain');
+await fs.mkdir(plainPlugin, { recursive: true });
+await fs.writeFile(path.join(plainPlugin, 'index.js'), 'plain');
+
+const mock5 = createMockGitHub();
+const port5 = await mock5.listen();
+await plugin.saveConfig({ apiBase: `http://127.0.0.1:${port5}`, categories: ['extensions'] });
+r = await plugin.push(await plugin.loadConfig());
+const files5 = mock5.headFiles();
+assert.ok(files5.has('extensions/plain/index.js'), '普通扩展应同步');
+assert.ok(![...files5.keys()].some((p) => p.includes('git-managed')), '含 .git 的扩展应跳过');
+assert.ok(r.skipped.some((s2) => s2.path.includes('git-managed')), '跳过的原因要能说清楚');
+console.log('✓ 酒馆自己管理的扩展（含 .git）被跳过并给出原因');
+await mock5.close();
+
 await mock.close();
 await fs.rm(tmp, { recursive: true, force: true });
 console.log('\n全部通过');

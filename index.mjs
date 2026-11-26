@@ -31,7 +31,7 @@ const BACKUP_DIR = path.join(CONF_DIR, 'backups');
 
 const PLUGIN_ID = 'tavernsync';
 const PLUGIN_NAME = '酒馆多端同步';
-const VERSION = '1.2.2';
+const VERSION = '1.3.0';
 const DEFAULT_API = 'https://api.github.com';
 /** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
 const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'tavernsync', branch: 'main' };
@@ -42,17 +42,30 @@ const TREE_CHUNK_BYTES = 12 * 1024 * 1024;
 
 /** 可同步的类别：key -> data/default-user 下的相对路径 */
 const CATEGORIES = {
-    chats: { label: '聊天', path: 'chats', dir: true },
+    chats: { label: '聊天记录', path: 'chats', dir: true },
     characters: { label: '角色卡', path: 'characters', dir: true },
     worlds: { label: '世界书', path: 'worlds', dir: true },
     groups: { label: '群组', path: 'groups', dir: true },
     presets: { label: '预设', path: 'OpenAI Settings', dir: true },
-    personas: { label: '人格', path: 'User Avatars', dir: true },
+    personas: { label: 'user', path: 'User Avatars', dir: true },
     backgrounds: { label: '背景图', path: 'backgrounds', dir: true },
-    themes: { label: '主题', path: 'themes', dir: true },
+    themes: { label: '美化', path: 'themes', dir: true },
     settings: { label: '设置 settings.json', path: 'settings.json', dir: false },
-    extensions: { label: '扩展清单', path: 'extensions-backup.json', dir: false },
+    // 酒馆插件（第三方扩展代码）：注意它在 ST 根目录下的 public/，不在 data/ 里
+    extensions: {
+        label: '酒馆插件',
+        path: 'public/scripts/extensions/third-party',
+        dir: true,
+        base: 'st',
+        skipGitDirs: true,
+        hint: '同步的是扩展代码本身；拉取后需要重启酒馆才会生效',
+    },
 };
+
+/** 类别对应的根目录：data/default-user 或 酒馆根目录 */
+function baseDirOf(cat) {
+    return cat.base === 'st' ? ST_ROOT : DATA_ROOT;
+}
 
 const DEFAULT_CATEGORIES = ['chats', 'characters', 'worlds'];
 
@@ -121,6 +134,31 @@ function progressSnapshot() {
 
 // ---------------------------------------------------------------- 错误说明
 
+/** 把 Node/undici 的网络异常翻译成可读原因 */
+function describeNetworkError(err) {
+    const raw = String((err && err.message) || err || '');
+    const code = (err && err.cause && err.cause.code) || (err && err.code) || '';
+    const table = {
+        ENOTFOUND: '域名解析失败（DNS）',
+        EAI_AGAIN: 'DNS 暂时解析失败',
+        ECONNREFUSED: '连接被拒绝',
+        ECONNRESET: '连接被对端重置',
+        ETIMEDOUT: '连接超时',
+        EPIPE: '连接已断开',
+        UND_ERR_CONNECT_TIMEOUT: '建立连接超时',
+        UND_ERR_HEADERS_TIMEOUT: '等待响应超时',
+        UND_ERR_BODY_TIMEOUT: '读取响应超时',
+        UND_ERR_SOCKET: '连接中途断开',
+        UND_ERR_CLOSED: '连接已关闭',
+    };
+    if (table[code]) return `${table[code]}（${code}）`;
+    if (/terminated/i.test(raw)) return '连接被中断（terminated）';
+    if (/fetch failed/i.test(raw)) return '请求未能发出（fetch failed）';
+    if (/abort/i.test(raw)) return '请求超时被中止';
+    if (/socket hang up/i.test(raw)) return '连接被对端挂断';
+    return raw || '未知网络错误';
+}
+
 /** 把 GitHub 的状态码翻译成「下一步该干什么」，避免只甩一个 404 */
 function explain(err, cfg) {
     const status = err && err.status;
@@ -146,7 +184,11 @@ function explain(err, cfg) {
             return '请求太频繁被限流：等几分钟再试。';
         }
         if (status === 0) {
-            return '连不上 api.github.com：检查手机网络；如果你在墙内且直连失败，可以把 API 地址换成可用的反代。';
+            const why = describeNetworkError(err && err.cause ? err.cause : err);
+            return `连不上 api.github.com（${why}）：已自动重试 3 次仍失败。检查手机网络/是否切换了 WiFi，或稍等重试；如果直连长期不通，把 API 地址换成「镜像」。同步到一半断网不会损坏数据，重试即可。`;
+        }
+        if (status === undefined && /fetch failed|terminated|socket|ECONN|ENOTFOUND|timeout/i.test(base)) {
+            return `网络中断（${describeNetworkError(err)}）：数据没有写入远端（或只写了临时对象，不会出现在分支上），恢复网络后重新推送/拉取即可。`;
         }
         return '';
     })();
@@ -297,7 +339,13 @@ async function saveConfig(patch) {
 async function loadState() {
     try {
         const s = JSON.parse(await fs.readFile(STATE_FILE, 'utf8'));
-        return { lastCommit: s.lastCommit || null, files: s.files || {}, hashCache: s.hashCache || {}, at: s.at || null };
+        return {
+            lastCommit: s.lastCommit || null,
+            files: s.files || {},
+            hashCache: s.hashCache || {},
+            at: s.at || null,
+            pullAt: s.pullAt || null,
+        };
     } catch {
         return { lastCommit: null, files: {}, hashCache: {}, at: null };
     }
@@ -358,7 +406,13 @@ async function gh(method, route, body, { tries = 3 } = {}) {
             lastError = err;
         } catch (err) {
             if (err instanceof GhError && !(err.status === 429 || err.status >= 500)) throw err;
-            lastError = err instanceof GhError ? err : new GhError(`连不上 GitHub：${err.message}`, 0);
+            if (err instanceof GhError) {
+                lastError = err;
+            } else {
+                const why = describeNetworkError(err);
+                lastError = new GhError(`连不上 GitHub：${why}`, 0);
+                lastError.cause = err;
+            }
             if (attempt === tries) throw lastError;
         }
         await sleep(800 * 2 ** (attempt - 1));
@@ -483,6 +537,38 @@ function isText(buf) {
     return !s.includes('\uFFFD') && Buffer.from(s, 'utf8').equals(buf);
 }
 
+/**
+ * 列出一个类别的文件。
+ * 对「酒馆插件」：跳过含 .git 的扩展目录（那是酒馆自己 git 管理的，两个写入方会互相覆盖）。
+ */
+async function collectCategoryFiles(cat, absPath, key, skipped) {
+    if (!cat.skipGitDirs) return walk(absPath);
+    const out = [];
+    let entries = [];
+    try {
+        entries = await fs.readdir(absPath, { withFileTypes: true });
+    } catch {
+        return out;
+    }
+    for (const e of entries) {
+        if (!e.isDirectory()) continue;
+        const dirAbs = path.join(absPath, e.name);
+        const managedByGit = await fs
+            .access(path.join(dirAbs, '.git'))
+            .then(() => true)
+            .catch(() => false);
+        if (managedByGit) {
+            skipped.push({
+                path: `${key}/${e.name}`,
+                reason: '这个扩展由酒馆自己管理（目录含 .git），已跳过，请在另一端自行安装',
+            });
+            continue;
+        }
+        for (const f of await walk(dirAbs)) out.push({ abs: f.abs, rel: `${e.name}/${f.rel}` });
+    }
+    return out;
+}
+
 async function collectLocal(cfg, state, { hash = true } = {}) {
     const out = new Map();
     const skipped = [];
@@ -493,9 +579,9 @@ async function collectLocal(cfg, state, { hash = true } = {}) {
     for (const key of cfg.categories) {
         const cat = CATEGORIES[key];
         if (!cat) continue;
-        const absPath = path.join(DATA_ROOT, cat.path);
+        const absPath = path.join(baseDirOf(cat), cat.path);
         const files = cat.dir
-            ? await walk(absPath)
+            ? await collectCategoryFiles(cat, absPath, key, skipped)
             : await fs
                   .stat(absPath)
                   .then(() => [{ abs: absPath, rel: path.basename(absPath) }])
@@ -640,14 +726,34 @@ async function push(cfg, { dryRun = false } = {}) {
             return { path: b.path, mode: '100644', type: 'blob', sha };
         });
 
-        const entries = [
-            ...textEntries.map(({ size, ...e }) => e),
-            ...blobEntries,
-            ...deletes.map((p) => ({ path: p, mode: '100644', type: 'blob', sha: null })),
-        ];
+        const newPaths = [...textEntries, ...blobEntries].map((e) => e.path);
+
+        // 旧文件和新目录同名时（例如以前推的是纯文件 extensions，现在是 extensions/<插件名>/...），
+        // Git 不允许同一个名字既是文件又是目录，所以先把这些旧文件单独删掉再写新内容。
+        const conflictingDeletes = deletes.filter((d) => newPaths.some((p) => p.startsWith(`${d}/`)));
 
         progressSet({ message: '写入提交…' });
         let baseTree = head?.tree || null;
+        let parentSha = head?.sha || null;
+
+        if (conflictingDeletes.length) {
+            let cleanTree = baseTree;
+            for (const chunk of chunkEntries(conflictingDeletes.map((q) => ({ path: q, mode: '100644', type: 'blob', sha: null })))) {
+                cleanTree = await createTree(repo, cleanTree, chunk);
+            }
+            parentSha = await createCommit(repo, `chore: 清理被目录替换的旧文件（${conflictingDeletes.join(', ')}）`, cleanTree, parentSha ? [parentSha] : []);
+            await updateRef(repo, cfg.branch, parentSha);
+            baseTree = cleanTree;
+            log(`已先清理 ${conflictingDeletes.length} 个与新目录同名的旧文件`);
+        }
+
+        const remainingDeletes = deletes.filter((q) => !conflictingDeletes.includes(q));
+        const entries = [
+            ...textEntries.map(({ size, ...e }) => e),
+            ...blobEntries,
+            ...remainingDeletes.map((p) => ({ path: p, mode: '100644', type: 'blob', sha: null })),
+        ];
+
         for (const chunk of chunkEntries(entries)) {
             baseTree = await createTree(repo, baseTree, chunk);
             const chunkBytes = chunk.reduce((s, e) => s + (e.content ? Buffer.byteLength(e.content) : 0), 0);
@@ -657,13 +763,19 @@ async function push(cfg, { dryRun = false } = {}) {
             });
         }
         const message = `sync(${process.env.TAVERNSYNC_HOSTNAME || 'tavern'}): ${adds.length} changed, ${deletes.length} deleted`;
-        const commitSha = await createCommit(repo, message, baseTree, head ? [head.sha] : []);
+        const commitSha = await createCommit(repo, message, baseTree, parentSha ? [parentSha] : []);
         await updateRef(repo, cfg.branch, commitSha);
 
         const fileShas = { ...(state.files || {}) };
         for (const [p, f] of files) fileShas[p] = f.sha;
         for (const p of deletes) delete fileShas[p];
-        await saveState({ lastCommit: commitSha, files: fileShas, hashCache: cache, at: new Date().toISOString() });
+        await saveState({
+            lastCommit: commitSha,
+            files: fileShas,
+            hashCache: cache,
+            at: new Date().toISOString(),
+            pullAt: state.pullAt || null,
+        });
 
         log(`推送完成：${adds.length} 个变更，${deletes.length} 个删除 → ${commitSha.slice(0, 7)}`);
         progressDone(`推送完成：${adds.length} 个变更，${deletes.length} 个删除`);
@@ -706,8 +818,8 @@ async function pull(cfg, { force = false } = {}) {
             if (!cat) continue;
             // 路径安全：拒绝 .. / 绝对路径，确保只落在 data/default-user 下
             const abs = cat.dir
-                ? safeLocalPath(DATA_ROOT, [cat.path, ...rest], repoPath)
-                : safeLocalPath(DATA_ROOT, [cat.path], repoPath);
+                ? safeLocalPath(baseDirOf(cat), [cat.path, ...rest], repoPath)
+                : safeLocalPath(baseDirOf(cat), [cat.path], repoPath);
             const want = remote.get(repoPath);
 
             let currentSha = null;
@@ -738,7 +850,7 @@ async function pull(cfg, { force = false } = {}) {
         for (const key of cfg.categories) {
             const cat = CATEGORIES[key];
             if (!cat || !cat.dir) continue;
-            for (const f of await walk(path.join(DATA_ROOT, cat.path))) {
+            for (const f of await walk(path.join(baseDirOf(cat), cat.path))) {
                 const repoPath = `${key}/${f.rel}`;
                 if (remote.has(repoPath)) continue;
                 await backupFile(repoPath, f.abs, stamp);
@@ -749,7 +861,13 @@ async function pull(cfg, { force = false } = {}) {
 
         const fileShas = {};
         for (const [p, v] of remote) if (isManaged(p, cfg.categories)) fileShas[p] = v.sha;
-        await saveState({ lastCommit: head.sha, files: fileShas, hashCache: {}, at: new Date().toISOString() });
+        await saveState({
+            lastCommit: head.sha,
+            files: fileShas,
+            hashCache: {},
+            at: new Date().toISOString(),
+            pullAt: new Date().toISOString(),
+        });
 
         if (result.updated.length || result.removed.length) {
             result.backup = path.join(BACKUP_DIR, stamp);
@@ -794,11 +912,11 @@ async function status() {
         autoPushMinutes: cfg.autoPushMinutes,
         local: { files: files.size, mb: Number((bytes / 1024 / 1024).toFixed(2)) },
         tookMs: Date.now() - startedAt,
-        last: { commit: state.lastCommit, at: state.at, files: Object.keys(state.files || {}).length },
+        last: { commit: state.lastCommit, at: state.at, pullAt: state.pullAt, files: Object.keys(state.files || {}).length },
         busy: Boolean(running),
         progress: progressSnapshot(),
         categories_meta: Object.fromEntries(
-            Object.entries(CATEGORIES).map(([k, v]) => [k, { label: v.label, path: v.path }]),
+            Object.entries(CATEGORIES).map(([k, v]) => [k, { label: v.label, path: v.path, hint: v.hint || '' }]),
         ),
         logs: logs.slice(-40),
     };
@@ -948,6 +1066,11 @@ async function runSync(kind) {
     await poll();
     const p = await api('progress');
     say(p.error ? p.error : p.message, Boolean(p.error));
+    if (kind === 'pull' && !p.error) {
+      say('拉取完成，正在刷新页面让改动生效…');
+      setTimeout(() => location.reload(), 1500);
+      return;
+    }
   } catch (e) {
     await poll();
     say(e.message, true);
@@ -979,6 +1102,7 @@ async function load() {
     for (const [key, info] of Object.entries(s.categories_meta)) {
       const lab = document.createElement('label');
       lab.innerHTML = '<input type="checkbox" value="' + key + '"> ' + info.label;
+      if (info.hint) lab.title = info.hint;
       el('cats').appendChild(lab);
     }
   }
