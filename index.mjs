@@ -34,7 +34,7 @@ const PLUGIN_NAME = '酒馆多端同步';
 const VERSION = '1.3.0';
 const DEFAULT_API = 'https://api.github.com';
 /** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
-const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'tavernsync', branch: 'main' };
+const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'SillyTaver_synchronize', branch: 'main' };
 /** 直连不通时的反代（已实测可读私有仓库、可 POST 写 blob） */
 const MIRROR_API = 'https://gh-proxy.com/https://api.github.com';
 const MAX_BLOB = 100 * 1024 * 1024;

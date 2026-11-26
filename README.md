@@ -21,7 +21,7 @@ SillyTavern 的数据都在 `data/default-user/` 下，换设备、重装、误�
 
 ```bash
 cd ~/SillyTavern
-git clone https://github.com/yiw221847-netizen/tavernsync.git plugins/tavernsync
+git clone https://github.com/yiw221847-netizen/SillyTaver_synchronize.git plugins/tavernsync
 bash plugins/tavernsync/install.sh .
 ```
 
