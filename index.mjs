@@ -15,6 +15,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { execFile } from 'node:child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -30,8 +31,10 @@ const BACKUP_DIR = path.join(CONF_DIR, 'backups');
 
 const PLUGIN_ID = 'tavernsync';
 const PLUGIN_NAME = '酒馆多端同步';
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const DEFAULT_API = 'https://api.github.com';
+/** 上游仓库：用于检查远端版本（公开仓库，查版本不需要 token） */
+const UPSTREAM = { owner: 'yiw221847-netizen', repo: 'tavernsync', branch: 'main' };
 /** 直连不通时的反代（已实测可读私有仓库、可 POST 写 blob） */
 const MIRROR_API = 'https://gh-proxy.com/https://api.github.com';
 const MAX_BLOB = 100 * 1024 * 1024;
@@ -148,6 +151,98 @@ function explain(err, cfg) {
         return '';
     })();
     return hint ? `${base}｜${hint}` : base;
+}
+
+// ---------------------------------------------------------------- 版本与更新
+
+function cmpVersion(a, b) {
+    const pa = String(a || '0').split('.').map((n) => parseInt(n, 10) || 0);
+    const pb = String(b || '0').split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const x = pa[i] || 0;
+        const y = pb[i] || 0;
+        if (x !== y) return x - y;
+    }
+    return 0;
+}
+
+/** 读取 GitHub 上最新发布的版本号（raw CDN，公开仓库，无需 token） */
+async function checkRemoteVersion() {
+    const url = `https://raw.githubusercontent.com/${UPSTREAM.owner}/${UPSTREAM.repo}/${UPSTREAM.branch}/package.json`;
+    let latest = null;
+    let error = null;
+    try {
+        const res = await fetch(url, {
+            headers: { 'User-Agent': 'tavernsync', 'Cache-Control': 'no-cache' },
+            signal: AbortSignal.timeout(20_000),
+        });
+        if (!res.ok) throw new Error(`GitHub 返回 ${res.status}`);
+        latest = (await res.json()).version || null;
+    } catch (err) {
+        error = `查不到远端版本：${err.message}`;
+    }
+    return {
+        current: VERSION,
+        latest,
+        hasUpdate: latest ? cmpVersion(latest, VERSION) > 0 : false,
+        error,
+        repo: `${UPSTREAM.owner}/${UPSTREAM.repo}`,
+    };
+}
+
+/** 对插件目录执行 git pull（只在用户点「一键更新」时触发，参数写死，不接受外部输入） */
+function gitPull() {
+    return new Promise((resolve, reject) => {
+        execFile(
+            'git',
+            ['-C', __dirname, 'pull', '--ff-only'],
+            { timeout: 180_000, windowsHide: true },
+            (err, stdout, stderr) => {
+                const out = `${stdout || ''}${stderr || ''}`.trim().slice(-600);
+                if (err) {
+                    if (/not a git repository/i.test(out)) {
+                        return reject(new Error('这个插件目录不是 git 仓库（可能是解压安装的），没法自动更新。请重新用 git clone 安装，或手动覆盖文件。'));
+                    }
+                    if (/could not resolve host|unable to access|timed out/i.test(out)) {
+                        return reject(new Error(`连不上 GitHub，更新失败：${out}`));
+                    }
+                    return reject(new Error(`更新失败：${out || err.message}`));
+                }
+                resolve(out || '已经是最新');
+            },
+        );
+    });
+}
+
+/**
+ * 保证前端入口存在：把插件自带的 st-extension 复制到酒馆的 third-party 扩展目录。
+ * 这样 git pull 之后重启酒馆，扩展列表里就能看到入口，不用再跑 install.sh。
+ */
+async function ensureFrontendExtension() {
+    const src = path.join(__dirname, 'st-extension');
+    const dest = path.join(ST_ROOT, 'public', 'scripts', 'extensions', 'third-party', PLUGIN_ID);
+    try {
+        await fs.access(path.join(src, 'manifest.json'));
+    } catch {
+        return { installed: false, reason: '插件里没有 st-extension 目录' };
+    }
+    try {
+        await fs.access(path.join(dest, 'manifest.json'));
+        return { installed: false, reason: '已存在', path: dest };
+    } catch {
+        // 不存在，往下装
+    }
+    try {
+        await fs.mkdir(dest, { recursive: true });
+        for (const name of await fs.readdir(src)) {
+            await fs.copyFile(path.join(src, name), path.join(dest, name));
+        }
+        log(`已安装前端入口：扩展程序 → 酒馆多端同步（${dest}）`);
+        return { installed: true, path: dest };
+    } catch (err) {
+        log(`前端入口安装失败：${err.message}`, 'error');
+        return { installed: false, error: err.message };
+    }
 }
 
 
@@ -733,6 +828,7 @@ pre{background:#111;border:1px solid #222;border-radius:6px;padding:10px;white-s
 .progtxt{font-size:12px;color:#9ad}
 </style></head><body>
 <h1>酒馆多端同步 <span style="color:#666;font-size:13px;font-weight:400">v${VERSION}</span></h1>
+<div class="hint" id="verline">正在检查远端版本…</div>
 <div class="hint">把酒馆数据同步到私有 GitHub 仓库：无需 git、无依赖，默认直连 api.github.com，不装代理也能用。</div>
 
 <h2>仓库</h2>
@@ -777,6 +873,8 @@ pre{background:#111;border:1px solid #222;border-radius:6px;padding:10px;white-s
 <button id="push">推送</button>
 <button id="pull" class="ghost">拉取</button>
 <button id="refresh" class="ghost">刷新</button>
+<button id="check" class="ghost">检查更新</button>
+<button id="upd" class="ghost" style="display:none">一键更新</button>
 </div>
 
 <div class="prog" id="prog">
@@ -896,6 +994,30 @@ function form() {
 }
 
 const act = (btn, fn) => async () => { btn.disabled = true; try { await fn(); } catch (e) { say(e.message, true); } finally { btn.disabled = false; } };
+async function checkVersion() {
+  const v = await api('version');
+  const line = el('verline');
+  if (v.error) { line.textContent = v.error; line.className = 'hint'; el('upd').style.display = 'none'; return; }
+  if (v.hasUpdate) {
+    line.innerHTML = '当前 <b>v' + v.current + '</b> · 远端已有 <b style="color:#5c9cff">v' + v.latest + '</b>，可以更新';
+    line.className = 'hint ok';
+    el('upd').style.display = 'inline-block';
+  } else {
+    line.textContent = '当前 v' + v.current + ' · 已是最新';
+    line.className = 'hint';
+    el('upd').style.display = 'none';
+  }
+}
+
+el('check').onclick = act(el('check'), checkVersion);
+el('upd').onclick = act(el('upd'), async () => {
+  say('正在执行 git pull…');
+  try {
+    const r = await api('update', {});
+    say(r.note + (r.output ? '（' + String(r.output).split('\n').filter(Boolean).slice(-2).join(' / ') + '）' : ''), true);
+  } finally { checkVersion().catch(() => {}); }
+});
+
 el('save').onclick = act(el('save'), async () => {
   if (!form().categories.length) { say('至少选一个同步范围', true); return; }
   await api('config', form()); await load(); say('配置已保存');
@@ -909,6 +1031,7 @@ el('pull').onclick = () => runSync('pull');
 el('refresh').onclick = act(el('refresh'), load);
 poll().then((running) => { if (running) startPoll(); });
 load().catch((e) => say(e.message, true));
+checkVersion().catch(() => { el('verline').textContent = '（版本检查失败，可点「检查更新」重试）'; });
 </script></body></html>`;
 }
 
@@ -964,6 +1087,9 @@ async function init(router) {
     const cfg = await loadConfig();
     scheduleAutoPush(cfg.autoPushMinutes);
 
+    // 自动补装前端入口（扩展可能因为手动安装/更新而缺失）
+    await ensureFrontendExtension();
+
     router.get('/ui', (req, res) => res.type('html').send(uiHtml()));
     router.get('/status', async (req, res) => {
         try {
@@ -975,6 +1101,34 @@ async function init(router) {
 
     // 推送/拉取的实时进度，前端每 700ms 轮询一次
     router.get('/progress', (req, res) => res.json(progressSnapshot()));
+
+    // 当前版本 vs GitHub 上的最新版本
+    router.get('/version', async (req, res) => {
+        const remote = await checkRemoteVersion();
+        res.json(remote);
+    });
+
+    // 一键更新：git pull --ff-only（目录与参数都写死，不接受外部输入）
+    router.post('/update', async (req, res) => {
+        if (running) return res.status(409).json({ error: '上一次同步还在进行中，等它结束再更新' });
+        running = 'update';
+        try {
+            const output = await gitPull();
+            const remote = await checkRemoteVersion().catch(() => null);
+            log('插件已更新，重启酒馆后生效');
+            res.json({
+                ok: true,
+                output,
+                restarted: false,
+                note: '代码已更新，重启酒馆（Ctrl+C 后重新启动）才会生效',
+                latest: remote && remote.latest,
+            });
+        } catch (err) {
+            res.status(400).json({ error: err.message });
+        } finally {
+            running = null;
+        }
+    });
 
     const doPush = async (body) => push(await loadConfig(), { dryRun: Boolean(body && body.dryRun) });
     const doPull = async (body) => pull(await loadConfig(), { force: Boolean(body && body.force) });

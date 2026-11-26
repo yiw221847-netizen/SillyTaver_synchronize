@@ -1,4 +1,4 @@
-# 酒馆多端同步 · TavernSync v1.2.0
+# 酒馆多端同步 · TavernSync v1.2.1
 
 > 把 SillyTavern 的聊天、角色卡、世界书等数据，同步到你自己账号下的**私有 GitHub 仓库**。
 > 不装 git、不装依赖、不挂代理也能跑；手机会员和电脑端共用一份数据。
@@ -28,11 +28,13 @@ bash plugins/tavernsync/install.sh .
 
 ```bash
 cd ~/storage/downloads
-unzip tavernsync-1.2.0.zip -d ts-install
+unzip tavernsync-1.2.1.zip -d ts-install
 bash ts-install/install.sh            # 自动找酒馆；找不到就传路径：bash ts-install/install.sh ~/SillyTavern
 ```
 
 install.sh 会做四件事：备份 `config.yaml`、把插件放进 `plugins/`、打开 `enableServerPlugins`、把前端入口装到 `public/scripts/extensions/third-party/tavernsync/`。
+
+> 1.2.1 起，插件启动时会**自己补装**这个前端入口，所以用 git clone + ST 自带的「服务端插件自动更新」也能保持同步，不必再手动跑 install.sh。
 
 装完**重启酒馆**，然后二选一进入面板：
 
@@ -62,6 +64,8 @@ install.sh 会做四件事：备份 `config.yaml`、把插件放进 `plugins/`�
 | 自动推送 | 下拉选择：关闭 / 15 / 30 / 60 分钟 |
 | Token | 保存在 `~/.tavernsync/config.json`（0600），面板不会回显 |
 | API 地址 | 下拉选择：**直连** api.github.com / **镜像**（gh-proxy 反代，直连打不开时选） |
+
+面板顶部会显示 `当前 v1.2.1`，并自动查询 GitHub 上的最新版本：有新版就出现「**一键更新**」按钮（内部执行 `git pull --ff-only`），更新完重启酒馆生效。
 
 同步范围默认「聊天 / 角色卡 / 世界书」。建议先只勾这三类跑通，再逐类加。`settings.json` 常有几十 MB 且各设备偏好不同，默认不同步。
 

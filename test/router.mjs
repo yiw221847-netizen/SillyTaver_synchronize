@@ -51,13 +51,22 @@ assert.equal(st2.payload.configured, true);
 const ui = await call('GET', '/ui');
 assert.equal(ui.status, 200);
 assert.match(ui.payload, /酒馆多端同步/);
-assert.match(ui.payload, /v1\.2\.0/);
+assert.match(ui.payload, /v1\.2\.1/);
 assert.match(ui.payload, /<select id="maxFileMB"/);
 
 // 进度接口
 const prog = await call('GET', '/progress');
 assert.equal(prog.status, 200);
 assert.equal(prog.payload.running, false);
+
+// 版本接口（离线时也要能返回本地版本）
+const ver = await call('GET', '/version');
+assert.equal(ver.status, 200);
+assert.equal(ver.payload.current, '1.2.1');
+
+// init 时应自动补装前端入口
+const extManifest = path.join(process.env.TAVERNSYNC_ROOT, 'public/scripts/extensions/third-party/tavernsync/manifest.json');
+await fs.stat(extManifest);
 
 // 没配 token 时 push 应返回 400 而不是崩
 await plugin.saveConfig({ token: '' });

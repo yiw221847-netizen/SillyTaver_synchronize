@@ -65,7 +65,7 @@ if [ -d "$EXT_SRC" ]; then
   else
     mkdir -p "$EXT_DEST"
     cp -a "$EXT_SRC/." "$EXT_DEST/"
-    echo "已安装前端入口：扩展程序里会出现「酒馆多端同步」"
+    echo "已安装前端入口：扩展程序里会出现「酒馆多端同步」（1.2.1 起插件启动时也会自动补装）"
   fi
 fi
 
